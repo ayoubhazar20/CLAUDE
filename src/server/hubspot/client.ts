@@ -55,13 +55,13 @@ export async function getAccessToken(connectionId: string): Promise<string> {
   if (!connection || connection.status === "DISCONNECTED") throw new HubSpotDisconnectedError();
   if (connection.expiresAt.getTime() - Date.now() > REFRESH_MARGIN_MS) return decrypt(connection.accessTokenEnc);
 
-  return prisma.$transaction(async (tx) => {
-    const rows = await tx.$queryRaw<HubSpotConnection[]>`SELECT * FROM "hubspot_connections" WHERE "id" = ${connectionId}::uuid FOR UPDATE`;
-    const locked = rows[0];
-    if (!locked) throw new HubSpotDisconnectedError();
-    // Another request may have refreshed while we waited for the lock.
-    if (locked.expiresAt.getTime() - Date.now() > REFRESH_MARGIN_MS) return decrypt(locked.accessTokenEnc);
-    try {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<HubSpotConnection[]>`SELECT * FROM "hubspot_connections" WHERE "id" = ${connectionId}::uuid FOR UPDATE`;
+      const locked = rows[0];
+      if (!locked) throw new HubSpotDisconnectedError();
+      // Another request may have refreshed while we waited for the lock.
+      if (locked.expiresAt.getTime() - Date.now() > REFRESH_MARGIN_MS) return decrypt(locked.accessTokenEnc);
       const tokens = await exchangeToken({ grant_type: "refresh_token", refresh_token: decrypt(locked.refreshTokenEnc) });
       await tx.hubSpotConnection.update({
         where: { id: connectionId },
@@ -74,17 +74,18 @@ export async function getAccessToken(connectionId: string): Promise<string> {
         },
       });
       return tokens.access_token;
-    } catch (error) {
-      if (error instanceof HubSpotApiError && error.httpStatus === 400) {
-        await tx.hubSpotConnection.update({
-          where: { id: connectionId },
-          data: { status: "ERROR", lastError: "Refresh token rejected — reconnect HubSpot.", lastErrorAt: new Date() },
-        });
-        throw new HubSpotDisconnectedError("The HubSpot connection has expired. Ask a Company Admin to reconnect HubSpot.");
-      }
-      throw error;
+    });
+  } catch (error) {
+    // Recorded outside the (rolled back) transaction so the admin sees the connection needs attention.
+    if (error instanceof HubSpotApiError && error.httpStatus === 400) {
+      await prisma.hubSpotConnection.update({
+        where: { id: connectionId },
+        data: { status: "ERROR", lastError: "Refresh token rejected — reconnect HubSpot.", lastErrorAt: new Date() },
+      });
+      throw new HubSpotDisconnectedError("The HubSpot connection has expired. Ask a Company Admin to reconnect HubSpot.");
     }
-  });
+    throw error;
+  }
 }
 
 export interface HubSpotObject {

@@ -27,6 +27,10 @@ export async function ensureSystemRoles(tx: Tx = prisma): Promise<Record<SystemR
 }
 
 let cachedRoles: Record<SystemRoleKey, Role> | null = null;
+/** Test hook: forget cached role rows (e.g. after truncating the database). */
+export function clearRoleCache() {
+  cachedRoles = null;
+}
 export async function systemRole(key: SystemRoleKey, tx: Tx = prisma): Promise<Role> {
   if (!cachedRoles) cachedRoles = await ensureSystemRoles(tx);
   return cachedRoles[key];
