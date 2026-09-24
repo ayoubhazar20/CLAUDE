@@ -1,0 +1,1262 @@
+// DealDocs — relational data model.
+//
+// Tenancy rule: every tenant-owned table carries `organizationId` (directly),
+// so every query can (and must) be scoped by organization. Internal ids are
+// UUIDs; public document links use a separate random token.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum UserTokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum OrganizationStatus {
+  PENDING_EMAIL_VERIFICATION
+  PENDING_APPROVAL
+  ACTIVE
+  REJECTED
+  SUSPENDED
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  DISABLED
+}
+
+enum HubSpotConnectionStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum HubSpotObjectType {
+  DEAL
+  CONTACT
+  COMPANY
+  LINE_ITEM
+  PRODUCT
+  OWNER
+}
+
+enum MappingDirection {
+  IMPORT
+  WRITEBACK
+}
+
+enum AutomationEvent {
+  QUOTE_PUBLISHED
+  QUOTE_SENT
+  QUOTE_VIEWED
+  QUOTE_ACCEPTED
+  QUOTE_REJECTED
+  CONTRACT_PUBLISHED
+  CONTRACT_SENT
+  CONTRACT_VIEWED
+  CONTRACT_SIGNED
+  CONTRACT_REJECTED
+}
+
+enum WebhookEventStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  IGNORED
+}
+
+enum DocumentType {
+  QUOTE
+  CONTRACT
+}
+
+enum TemplateStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum TemplateVersionStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum AcceptanceMode {
+  ACCEPTANCE_ONLY
+  SIGNATURE_REQUIRED
+}
+
+enum DocumentStatus {
+  DRAFT
+  PUBLISHED
+  SENT
+  VIEWED
+  AWAITING_SIGNATURE
+  ACCEPTED
+  SIGNED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum DocumentVersionStatus {
+  DRAFT
+  PUBLISHED
+  SUPERSEDED
+  ACCEPTED
+  SIGNED
+  DISCARDED
+}
+
+enum LineItemSource {
+  HUBSPOT_LINE_ITEM
+  HUBSPOT_PRODUCT
+  CUSTOM
+}
+
+enum DiscountType {
+  NONE
+  PERCENT
+  AMOUNT
+}
+
+enum RecipientRole {
+  SIGNER
+  APPROVER
+  CC
+}
+
+enum RecipientStatus {
+  PENDING
+  VIEWED
+  ACCEPTED
+  SIGNED
+  REJECTED
+}
+
+enum SigningOrder {
+  ANY
+  SEQUENTIAL
+}
+
+enum RelationshipType {
+  CONVERTED_FROM_QUOTE
+  DUPLICATED_FROM
+}
+
+enum CustomFieldType {
+  TEXT
+  LONG_TEXT
+  NUMBER
+  DATE
+  BOOLEAN
+  SELECT
+}
+
+enum AttachmentVisibility {
+  INTERNAL
+  CLIENT
+}
+
+enum FileKind {
+  LOGO
+  ATTACHMENT
+  PDF
+  SIGNED_PDF
+  SIGNATURE
+  IMAGE
+}
+
+enum EmailTemplateKind {
+  QUOTE_SEND
+  CONTRACT_SEND
+  REMINDER
+  SIGNED_DOCUMENT
+}
+
+enum EmailDeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+}
+
+enum OtpAction {
+  ACCEPT_QUOTE
+  REJECT_DOCUMENT
+  SIGN_CONTRACT
+}
+
+enum SignatureKind {
+  ACCEPTANCE
+  SIGNATURE
+}
+
+enum SignatureMethod {
+  CLICK_ACCEPT
+  TYPED
+  DRAWN
+}
+
+enum ActorType {
+  USER
+  RECIPIENT
+  SYSTEM
+  PLATFORM_ADMIN
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  DEAD
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+enum LegalDocumentType {
+  TERMS_OF_SERVICE
+  PRIVACY_POLICY
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+model User {
+  id                 String     @id @default(uuid()) @db.Uuid
+  email              String     @unique
+  name               String
+  passwordHash       String
+  emailVerifiedAt    DateTime?
+  status             UserStatus @default(ACTIVE)
+  isPlatformAdmin    Boolean    @default(false)
+  locale             String     @default("en")
+  // 2FA architecture — not activated in V1. Secret is encrypted at rest.
+  twoFactorEnabled   Boolean    @default(false)
+  twoFactorSecretEnc String?
+  lastLoginAt        DateTime?
+  failedLoginCount   Int        @default(0)
+  lockedUntil        DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  sessions        Session[]
+  tokens          UserToken[]
+  memberships     OrganizationMembership[]
+  termsAcceptance TermsAcceptance[]
+  notifications   Notification[]
+  ownedDocuments  Document[]               @relation("DocumentOwner")
+
+  @@map("users")
+}
+
+model Session {
+  id                    String    @id @default(uuid()) @db.Uuid
+  tokenHash             String    @unique
+  userId                String    @db.Uuid
+  activeOrganizationId  String?   @db.Uuid
+  // Platform admin "support view" into a tenant (always audited).
+  supportOrganizationId String?   @db.Uuid
+  ip                    String?
+  userAgent             String?
+  createdAt             DateTime  @default(now())
+  lastSeenAt            DateTime  @default(now())
+  expiresAt             DateTime
+  revokedAt             DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model UserToken {
+  id        String        @id @default(uuid()) @db.Uuid
+  userId    String        @db.Uuid
+  type      UserTokenType
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@map("user_tokens")
+}
+
+model TermsAcceptance {
+  id             String            @id @default(uuid()) @db.Uuid
+  userId         String            @db.Uuid
+  organizationId String?           @db.Uuid
+  documentType   LegalDocumentType
+  version        String
+  acceptedAt     DateTime          @default(now())
+  ip             String?
+  userAgent      String?
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([userId])
+  @@map("terms_acceptances")
+}
+
+// ───────────────────────────── Tenancy ─────────────────────────────
+
+model Organization {
+  id                    String             @id @default(uuid()) @db.Uuid
+  name                  String
+  legalName             String?
+  country               String?
+  addressLine1          String?
+  addressLine2          String?
+  city                  String?
+  postalCode            String?
+  region                String?
+  phone                 String?
+  website               String?
+  defaultCurrency       String             @default("MAD")
+  timezone              String             @default("UTC")
+  language              String             @default("en")
+  registrationNumber    String?
+  vatNumber             String?
+  logoFileId            String?            @db.Uuid
+  brandColor            String             @default("#2563eb")
+  status                OrganizationStatus @default(PENDING_EMAIL_VERIFICATION)
+  submittedAt           DateTime?
+  approvedAt            DateTime?
+  approvedById          String?            @db.Uuid
+  rejectedAt            DateTime?
+  rejectionReason       String?
+  suspendedAt           DateTime?
+  suspensionReason      String?
+  onboardingState       Json               @default("{}")
+  onboardingCompletedAt DateTime?
+  createdById           String?            @db.Uuid
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  memberships           OrganizationMembership[]
+  invitations           Invitation[]
+  teams                 Team[]
+  roles                 Role[]
+  hubspotConnections    HubSpotConnection[]
+  propertyMappings      HubSpotPropertyMapping[]
+  pipelineMappings      HubSpotPipelineMapping[]
+  templates             Template[]
+  documents             Document[]
+  customFieldDefinitions CustomFieldDefinition[]
+  emailTemplates        EmailTemplate[]
+  numberingSettings     NumberingSetting[]
+  subscriptions         Subscription[]
+  termsAcceptances      TermsAcceptance[]
+  usageRecords          UsageRecord[]
+  files                 StoredFile[]
+
+  @@index([status])
+  @@map("organizations")
+}
+
+model Role {
+  id             String   @id @default(uuid()) @db.Uuid
+  // null = built-in system role shared by all organizations.
+  organizationId String?  @db.Uuid
+  key            String
+  name           String
+  description    String?
+  isSystem       Boolean  @default(false)
+  // Lower rank = more privileged; used for "can manage role" checks.
+  rank           Int      @default(100)
+  createdAt      DateTime @default(now())
+
+  organization Organization?            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  permissions  RolePermission[]
+  memberships  OrganizationMembership[]
+  invitations  Invitation[]
+
+  @@unique([organizationId, key])
+  @@map("roles")
+}
+
+model RolePermission {
+  roleId     String @db.Uuid
+  permission String
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permission])
+  @@map("role_permissions")
+}
+
+model OrganizationMembership {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @db.Uuid
+  userId         String           @db.Uuid
+  roleId         String           @db.Uuid
+  status         MembershipStatus @default(ACTIVE)
+  invitedById    String?          @db.Uuid
+  joinedAt       DateTime?
+  disabledAt     DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role         Role             @relation(fields: [roleId], references: [id])
+  teams        TeamMembership[]
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_memberships")
+}
+
+model Invitation {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  email          String
+  roleId         String    @db.Uuid
+  teamId         String?   @db.Uuid
+  tokenHash      String    @unique
+  invitedById    String    @db.Uuid
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id])
+
+  @@index([organizationId, email])
+  @@map("invitations")
+}
+
+model Team {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  name           String
+  createdAt      DateTime @default(now())
+  archivedAt     DateTime?
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members      TeamMembership[]
+  documents    Document[]
+
+  @@unique([organizationId, name])
+  @@map("teams")
+}
+
+model TeamMembership {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  teamId         String   @db.Uuid
+  membershipId   String   @db.Uuid
+  isManager      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  team       Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  membership OrganizationMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, membershipId])
+  @@index([organizationId])
+  @@map("team_memberships")
+}
+
+// ───────────────────────────── HubSpot ─────────────────────────────
+
+model HubSpotConnection {
+  id              String                  @id @default(uuid()) @db.Uuid
+  organizationId  String                  @db.Uuid
+  portalId        String
+  hubDomain       String?
+  // OAuth tokens are AES-256-GCM encrypted at rest (see src/server/security/crypto.ts).
+  accessTokenEnc  String
+  refreshTokenEnc String
+  expiresAt       DateTime
+  scopes          String[]
+  installedById   String?                 @db.Uuid
+  installedAt     DateTime                @default(now())
+  status          HubSpotConnectionStatus @default(CONNECTED)
+  isPrimary       Boolean                 @default(true)
+  lastError       String?
+  lastErrorAt     DateTime?
+  disconnectedAt  DateTime?
+  // Sync options (default behaviour, writeback on/off …)
+  settings        Json                    @default("{}")
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, portalId])
+  @@index([portalId])
+  @@map("hubspot_connections")
+}
+
+model OAuthState {
+  id             String    @id @default(uuid()) @db.Uuid
+  stateHash      String    @unique
+  organizationId String    @db.Uuid
+  userId         String    @db.Uuid
+  redirectTo     String?
+  expiresAt      DateTime
+  usedAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@map("oauth_states")
+}
+
+model HubSpotPropertyMapping {
+  id              String            @id @default(uuid()) @db.Uuid
+  organizationId  String            @db.Uuid
+  objectType      HubSpotObjectType
+  hubspotProperty String
+  // DealDocs variable key, e.g. "deal.name" or "project.startDate".
+  variableKey     String
+  direction       MappingDirection  @default(IMPORT)
+  label           String?
+  enabled         Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, direction, objectType, hubspotProperty, variableKey])
+  @@map("hubspot_property_mappings")
+}
+
+model HubSpotPipelineMapping {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+  event          AutomationEvent
+  pipelineId     String
+  pipelineLabel  String?
+  stageId        String
+  stageLabel     String?
+  enabled        Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, event, pipelineId])
+  @@map("hubspot_pipeline_mappings")
+}
+
+model HubSpotWebhookEvent {
+  id               String             @id @default(uuid()) @db.Uuid
+  portalId         String
+  eventId          String
+  organizationId   String?            @db.Uuid
+  subscriptionType String
+  objectId         String?
+  propertyName     String?
+  propertyValue    String?
+  occurredAt       DateTime?
+  payload          Json
+  status           WebhookEventStatus @default(RECEIVED)
+  attempts         Int                @default(0)
+  error            String?
+  receivedAt       DateTime           @default(now())
+  processedAt      DateTime?
+
+  // Idempotency: HubSpot may deliver the same event more than once.
+  @@unique([portalId, eventId])
+  @@index([status])
+  @@map("hubspot_webhook_events")
+}
+
+// ───────────────────────────── Templates ─────────────────────────────
+
+model Template {
+  id                 String         @id @default(uuid()) @db.Uuid
+  organizationId     String         @db.Uuid
+  documentType       DocumentType
+  name               String
+  description        String?
+  status             TemplateStatus @default(ACTIVE)
+  isDefault          Boolean        @default(false)
+  // Latest published version (used for new documents).
+  publishedVersionId String?        @db.Uuid
+  createdById        String?        @db.Uuid
+  archivedAt         DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  versions     TemplateVersion[]
+  documents    Document[]
+
+  @@index([organizationId, documentType, status])
+  @@map("templates")
+}
+
+model TemplateVersion {
+  id             String                @id @default(uuid()) @db.Uuid
+  organizationId String                @db.Uuid
+  templateId     String                @db.Uuid
+  version        Int
+  status         TemplateVersionStatus @default(DRAFT)
+  // Block tree (see src/domain/blocks.ts).
+  content        Json
+  // Acceptance mode, expiration days, default terms, signing order …
+  settings       Json                  @default("{}")
+  createdById    String?               @db.Uuid
+  publishedAt    DateTime?
+  publishedById  String?               @db.Uuid
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  template  Template          @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  documents Document[]
+  documentVersions DocumentVersion[]
+
+  @@unique([templateId, version])
+  @@index([organizationId])
+  @@map("template_versions")
+}
+
+model CustomFieldDefinition {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+  // Variable key, e.g. "project.startDate"
+  key            String
+  label          String
+  type           CustomFieldType @default(TEXT)
+  options        String[]
+  defaultValue   String?
+  appliesTo      DocumentType[]
+  required       Boolean         @default(false)
+  archivedAt     DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  values       CustomFieldValue[]
+
+  @@unique([organizationId, key])
+  @@map("custom_field_definitions")
+}
+
+model CustomFieldValue {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  documentId     String   @db.Uuid
+  definitionId   String   @db.Uuid
+  value          String?
+  updatedAt      DateTime @updatedAt
+
+  document   Document              @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  definition CustomFieldDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, definitionId])
+  @@index([organizationId])
+  @@map("custom_field_values")
+}
+
+// ───────────────────────────── Documents ─────────────────────────────
+
+model NumberingSetting {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  documentType   DocumentType
+  prefix         String
+  includeYear    Boolean      @default(true)
+  startNumber    Int          @default(1)
+  padding        Int          @default(6)
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, documentType])
+  @@map("numbering_settings")
+}
+
+// Monotonic counters. Rows are only ever incremented; numbers are never reused.
+model NumberingCounter {
+  organizationId String       @db.Uuid
+  documentType   DocumentType
+  // Calendar year when numbering includes the year, 0 otherwise.
+  scope          Int
+  lastValue      Int
+
+  @@id([organizationId, documentType, scope])
+  @@map("numbering_counters")
+}
+
+model Document {
+  id                 String         @id @default(uuid()) @db.Uuid
+  organizationId     String         @db.Uuid
+  type               DocumentType
+  number             String
+  title              String
+  status             DocumentStatus @default(DRAFT)
+  ownerId            String         @db.Uuid
+  teamId             String?        @db.Uuid
+  createdById        String         @db.Uuid
+  templateId         String?        @db.Uuid
+  templateVersionId  String?        @db.Uuid
+  hubspotConnectionId String?       @db.Uuid
+  hubspotPortalId    String?
+  hubspotDealId      String?
+  hubspotDealName    String?
+  isPrimary          Boolean        @default(false)
+  currency           String
+  acceptanceMode     AcceptanceMode @default(ACCEPTANCE_ONLY)
+  signingOrder       SigningOrder   @default(ANY)
+  // Stable public link token — never changes across revisions.
+  publicToken        String         @unique
+  // Working draft version (null when no draft is open).
+  draftVersionId     String?        @db.Uuid
+  // Version currently shown on the public page.
+  publishedVersionId String?        @db.Uuid
+  latestVersionNumber Int           @default(0)
+  // Denormalised for listing / filtering.
+  clientName         String?
+  clientCompany      String?
+  grandTotal         Decimal        @default(0) @db.Decimal(20, 4)
+  expiresAt          DateTime?
+  publishedAt        DateTime?
+  firstPublishedAt   DateTime?
+  sentAt             DateTime?
+  lastSentAt         DateTime?
+  firstViewedAt      DateTime?
+  lastViewedAt       DateTime?
+  viewCount          Int            @default(0)
+  uniqueViewCount    Int            @default(0)
+  sendCount          Int            @default(0)
+  reminderCount      Int            @default(0)
+  revisionCount      Int            @default(0)
+  acceptedAt         DateTime?
+  signedAt           DateTime?
+  rejectedAt         DateTime?
+  rejectionReason    String?
+  expiredAt          DateTime?
+  cancelledAt        DateTime?
+  archivedAt         DateTime?
+  sourceQuoteId      String?        @db.Uuid
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  organization    Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  owner           User                 @relation("DocumentOwner", fields: [ownerId], references: [id])
+  team            Team?                @relation(fields: [teamId], references: [id])
+  template        Template?            @relation(fields: [templateId], references: [id])
+  templateVersion TemplateVersion?     @relation(fields: [templateVersionId], references: [id])
+  sourceQuote     Document?            @relation("QuoteToContract", fields: [sourceQuoteId], references: [id])
+  derivedContracts Document[]          @relation("QuoteToContract")
+  versions        DocumentVersion[]
+  recipients      DocumentRecipient[]
+  events          DocumentEvent[]
+  statusChanges   DocumentStatusChange[]
+  attachments     Attachment[]
+  emailDeliveries EmailDelivery[]
+  otpChallenges   OtpChallenge[]
+  signatures      Signature[]
+  views           DocumentView[]
+  customFieldValues CustomFieldValue[]
+  relationshipsFrom DocumentRelationship[] @relation("RelSource")
+  relationshipsTo   DocumentRelationship[] @relation("RelTarget")
+
+  @@unique([organizationId, number])
+  @@index([organizationId, type, status])
+  @@index([organizationId, hubspotDealId])
+  @@index([organizationId, ownerId])
+  @@index([organizationId, createdAt])
+  @@map("documents")
+}
+
+model DocumentVersion {
+  id                String                @id @default(uuid()) @db.Uuid
+  organizationId    String                @db.Uuid
+  documentId        String                @db.Uuid
+  versionNumber     Int
+  status            DocumentVersionStatus @default(DRAFT)
+  templateVersionId String?               @db.Uuid
+  // Block tree (document instance, independent from template).
+  content           Json
+  // Structured data snapshot: client, company, deal, recipient(s), variables, terms …
+  data              Json
+  // Pricing configuration: global discounts, taxes, fees.
+  pricingConfig     Json
+  // Computed totals snapshot (strings, decimal-safe).
+  totals            Json                  @default("{}")
+  currency          String
+  expiresAt         DateTime?
+  // Rendered HTML snapshot captured at publication (evidence).
+  renderedHtml      String?
+  // SHA-256 over the canonical JSON of the published snapshot.
+  contentHash       String?
+  pdfFileId         String?               @db.Uuid
+  pdfGeneratedAt    DateTime?
+  signedPdfFileId   String?               @db.Uuid
+  createdById       String?               @db.Uuid
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  publishedAt       DateTime?
+  publishedById     String?               @db.Uuid
+  // Once locked, content/data/pricing/line items can never change (enforced by DB trigger).
+  lockedAt          DateTime?
+  completedAt       DateTime?
+
+  document        Document           @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  templateVersion TemplateVersion?   @relation(fields: [templateVersionId], references: [id])
+  lineItems       DocumentLineItem[]
+  signatures      Signature[]
+
+  @@unique([documentId, versionNumber])
+  @@index([organizationId])
+  @@map("document_versions")
+}
+
+model DocumentLineItem {
+  id               String         @id @default(uuid()) @db.Uuid
+  organizationId   String         @db.Uuid
+  versionId        String         @db.Uuid
+  position         Int
+  source           LineItemSource @default(CUSTOM)
+  hubspotLineItemId String?
+  hubspotProductId String?
+  sku              String?
+  name             String
+  description      String?
+  category         String?
+  quantity         Decimal        @db.Decimal(20, 6)
+  unitPrice        Decimal        @db.Decimal(20, 6)
+  discountType     DiscountType   @default(NONE)
+  discountValue    Decimal        @default(0) @db.Decimal(20, 6)
+  // Keys of taxes (from the version's pricingConfig.taxes) applied to this line.
+  taxKeys          String[]
+  optional         Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  version DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+
+  @@index([versionId, position])
+  @@index([organizationId])
+  @@map("document_line_items")
+}
+
+model DocumentRecipient {
+  id               String          @id @default(uuid()) @db.Uuid
+  organizationId   String          @db.Uuid
+  documentId       String          @db.Uuid
+  role             RecipientRole   @default(SIGNER)
+  name             String
+  email            String
+  title            String?
+  phone            String?
+  hubspotContactId String?
+  signingOrder     Int             @default(1)
+  required         Boolean         @default(true)
+  // Status against the currently published version (reset on new publication).
+  status           RecipientStatus @default(PENDING)
+  isPrimary        Boolean         @default(false)
+  removedAt        DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  document      Document       @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  signatures    Signature[]
+  otpChallenges OtpChallenge[]
+
+  @@index([documentId])
+  @@index([organizationId])
+  @@map("document_recipients")
+}
+
+model DocumentRelationship {
+  id               String           @id @default(uuid()) @db.Uuid
+  organizationId   String           @db.Uuid
+  sourceDocumentId String           @db.Uuid
+  targetDocumentId String           @db.Uuid
+  type             RelationshipType
+  createdAt        DateTime         @default(now())
+
+  source Document @relation("RelSource", fields: [sourceDocumentId], references: [id], onDelete: Restrict)
+  target Document @relation("RelTarget", fields: [targetDocumentId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId])
+  @@index([sourceDocumentId])
+  @@index([targetDocumentId])
+  @@map("document_relationships")
+}
+
+model DocumentStatusChange {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+  documentId     String          @db.Uuid
+  versionNumber  Int?
+  fromStatus     DocumentStatus?
+  toStatus       DocumentStatus
+  actorType      ActorType
+  actorUserId    String?         @db.Uuid
+  recipientId    String?         @db.Uuid
+  reason         String?
+  createdAt      DateTime        @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@index([documentId, createdAt])
+  @@map("document_status_changes")
+}
+
+model DocumentEvent {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  documentId     String    @db.Uuid
+  versionNumber  Int?
+  type           String
+  actorType      ActorType
+  actorUserId    String?   @db.Uuid
+  recipientId    String?   @db.Uuid
+  actorLabel     String?
+  ip             String?
+  userAgent      String?
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@index([documentId, createdAt])
+  @@index([organizationId, type, createdAt])
+  @@map("document_events")
+}
+
+model DocumentView {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  documentId     String    @db.Uuid
+  versionNumber  Int
+  // Hash of a first-party visitor cookie — identifies unique viewers without storing PII.
+  visitorHash    String
+  ip             String?
+  userAgent      String?
+  viewedAt       DateTime  @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@index([documentId, visitorHash])
+  @@map("document_views")
+}
+
+// ───────────────────────────── Files & attachments ─────────────────────────────
+
+model StoredFile {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String?  @db.Uuid
+  kind           FileKind
+  storageKey     String   @unique
+  filename       String
+  contentType    String
+  size           Int
+  checksum       String
+  createdById    String?  @db.Uuid
+  createdAt      DateTime @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  attachments  Attachment[]
+
+  @@index([organizationId, kind])
+  @@map("stored_files")
+}
+
+model Attachment {
+  id             String               @id @default(uuid()) @db.Uuid
+  organizationId String               @db.Uuid
+  documentId     String               @db.Uuid
+  fileId         String               @db.Uuid
+  name           String
+  visibility     AttachmentVisibility @default(INTERNAL)
+  uploadedById   String?              @db.Uuid
+  archivedAt     DateTime?
+  createdAt      DateTime             @default(now())
+
+  document Document   @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  file     StoredFile @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@index([documentId])
+  @@index([organizationId])
+  @@map("attachments")
+}
+
+// ───────────────────────────── Email ─────────────────────────────
+
+model EmailTemplate {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @db.Uuid
+  kind           EmailTemplateKind
+  name           String
+  subject        String
+  body           String
+  isDefault      Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, kind])
+  @@map("email_templates")
+}
+
+model EmailDelivery {
+  id                String              @id @default(uuid()) @db.Uuid
+  // null for platform/system emails (verification, password reset…)
+  organizationId    String?             @db.Uuid
+  documentId        String?             @db.Uuid
+  versionNumber     Int?
+  kind              String
+  to                String[]
+  cc                String[]
+  subject           String
+  bodyHtml          String
+  bodyText          String?
+  status            EmailDeliveryStatus @default(QUEUED)
+  provider          String?
+  providerMessageId String?
+  error             String?
+  attempts          Int                 @default(0)
+  sentById          String?             @db.Uuid
+  queuedAt          DateTime            @default(now())
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  failedAt          DateTime?
+
+  document Document? @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, documentId])
+  @@map("email_deliveries")
+}
+
+// ───────────────────────────── OTP & signatures ─────────────────────────────
+
+model OtpChallenge {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  documentId     String    @db.Uuid
+  versionNumber  Int
+  recipientId    String    @db.Uuid
+  email          String
+  action         OtpAction
+  // HMAC-SHA256 of the code bound to (challenge, document, recipient, email, action).
+  codeHash       String
+  expiresAt      DateTime
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(5)
+  verifiedAt     DateTime?
+  // Short-lived grant issued after verification, consumed by the final action.
+  grantHash      String?   @unique
+  grantExpiresAt DateTime?
+  consumedAt     DateTime?
+  invalidatedAt  DateTime?
+  ip             String?
+  userAgent      String?
+  createdAt      DateTime  @default(now())
+
+  document  Document          @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  recipient DocumentRecipient @relation(fields: [recipientId], references: [id], onDelete: Restrict)
+  signature Signature?
+
+  @@index([documentId, recipientId, action])
+  @@map("otp_challenges")
+}
+
+model Signature {
+  id              String          @id @default(uuid()) @db.Uuid
+  organizationId  String          @db.Uuid
+  documentId      String          @db.Uuid
+  versionId       String          @db.Uuid
+  recipientId     String          @db.Uuid
+  kind            SignatureKind
+  method          SignatureMethod
+  signerName      String
+  signerEmail     String
+  // Typed name or PNG data URL of the drawn signature.
+  signatureData   String?
+  documentHash    String
+  otpChallengeId  String          @unique @db.Uuid
+  consentText     String?
+  consentedAt     DateTime?
+  ip              String?
+  userAgent       String?
+  signedAt        DateTime        @default(now())
+
+  document     Document          @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  version      DocumentVersion   @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  recipient    DocumentRecipient @relation(fields: [recipientId], references: [id], onDelete: Restrict)
+  otpChallenge OtpChallenge      @relation(fields: [otpChallengeId], references: [id], onDelete: Restrict)
+
+  @@unique([versionId, recipientId, kind])
+  @@index([documentId])
+  @@map("signatures")
+}
+
+// ───────────────────────────── Notifications & audit ─────────────────────────────
+
+model Notification {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @db.Uuid
+  userId         String    @db.Uuid
+  type           String
+  title          String
+  body           String?
+  link           String?
+  documentId     String?   @db.Uuid
+  readAt         DateTime?
+  emailedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, organizationId, readAt])
+  @@map("notifications")
+}
+
+// Append-only (UPDATE/DELETE blocked by DB trigger).
+model AuditLog {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String?   @db.Uuid
+  userId         String?   @db.Uuid
+  actorType      ActorType
+  actorLabel     String?
+  action         String
+  entityType     String?
+  entityId       String?
+  ip             String?
+  userAgent      String?
+  previousValue  Json?
+  newValue       Json?
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+model ErrorLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  traceId        String   @unique
+  organizationId String?  @db.Uuid
+  userId         String?  @db.Uuid
+  source         String
+  message        String
+  stack          String?
+  context        Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("error_logs")
+}
+
+// ───────────────────────────── Infrastructure ─────────────────────────────
+
+model Job {
+  id             String    @id @default(uuid()) @db.Uuid
+  type           String
+  payload        Json
+  organizationId String?   @db.Uuid
+  status         JobStatus @default(PENDING)
+  dedupeKey      String?   @unique
+  runAt          DateTime  @default(now())
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(5)
+  lastError      String?
+  lockedAt       DateTime?
+  lockedBy       String?
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([status, runAt])
+  @@map("jobs")
+}
+
+model RateLimitBucket {
+  key         String   @id
+  count       Int
+  windowStart DateTime
+
+  @@map("rate_limit_buckets")
+}
+
+// ───────────────────────────── Billing readiness ─────────────────────────────
+
+model Plan {
+  id                   String   @id @default(uuid()) @db.Uuid
+  key                  String   @unique
+  name                 String
+  description          String?
+  // null limit = unlimited
+  maxUsers             Int?
+  maxDocumentsPerMonth Int?
+  maxStorageMb         Int?
+  maxHubSpotConnections Int?    @default(1)
+  features             String[]
+  priceMonthly         Decimal? @db.Decimal(12, 2)
+  currency             String   @default("USD")
+  isActive             Boolean  @default(true)
+  isDefault            Boolean  @default(false)
+  sortOrder            Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id                     String             @id @default(uuid()) @db.Uuid
+  organizationId         String             @db.Uuid
+  planId                 String             @db.Uuid
+  status                 SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart     DateTime           @default(now())
+  currentPeriodEnd       DateTime?
+  provider               String?
+  externalCustomerId     String?
+  externalSubscriptionId String?
+  cancelledAt            DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan         Plan         @relation(fields: [planId], references: [id])
+
+  @@index([organizationId, status])
+  @@map("subscriptions")
+}
+
+model UsageRecord {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  metric         String
+  quantity       Int
+  periodStart    DateTime
+  metadata       Json     @default("{}")
+  recordedAt     DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, metric, periodStart])
+  @@map("usage_records")
+}
