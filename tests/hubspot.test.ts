@@ -122,3 +122,12 @@ describe("HubSpot signatures, webhooks and tokens", () => {
     expect((await prisma.hubSpotConnection.findUniqueOrThrow({ where: { id: revoked.id } })).status).toBe("ERROR");
   });
 });
+
+describe("webhook event normalisation", () => {
+  it("maps new-platform object events for deals to deal events", async () => {
+    const { normalizeSubscriptionType } = await import("@/server/hubspot/webhooks");
+    expect(normalizeSubscriptionType({ subscriptionType: "object.propertyChange", objectTypeId: "0-3" })).toBe("deal.propertyChange");
+    expect(normalizeSubscriptionType({ subscriptionType: "object.deletion", objectTypeId: "0-1" })).toBe("object.deletion");
+    expect(normalizeSubscriptionType({ subscriptionType: "deal.deletion" })).toBe("deal.deletion");
+  });
+});

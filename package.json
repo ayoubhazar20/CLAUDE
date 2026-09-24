@@ -2,7 +2,7 @@
   "name": "dealdocs",
   "version": "0.1.0",
   "private": true,
-  "description": "DealDocs — multi-tenant quote & contract management SaaS integrated with HubSpot",
+  "description": "DealDocs \u2014 multi-tenant quote & contract management SaaS integrated with HubSpot",
   "engines": {
     "node": ">=20.9.0"
   },
@@ -19,7 +19,10 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "build:standalone": "npm run build && bash scripts/package-standalone.sh",
+    "start:standalone": "node .next/standalone/server.js",
+    "admin:create": "tsx scripts/create-platform-admin.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -37,6 +40,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "sanitize-html": "^2.17.7",
+    "tsx": "^4.23.15",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -49,7 +53,6 @@
     "playwright": "^1.63.0",
     "prisma": "^6.19.3",
     "tailwindcss": "^4.3.3",
-    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^3.2.7"
   }

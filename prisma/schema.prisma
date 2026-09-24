@@ -6,6 +6,8 @@
 
 generator client {
   provider = "prisma-client-js"
+  // native = dev machine; debian = Hostinger VPS (Ubuntu/Debian); rhel = Hostinger managed Node.js hosting (CloudLinux).
+  binaryTargets = ["native", "debian-openssl-3.0.x", "rhel-openssl-3.0.x"]
 }
 
 datasource db {

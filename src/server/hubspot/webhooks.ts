@@ -19,6 +19,14 @@ export interface HubSpotWebhookEventPayload {
   propertyName?: string;
   propertyValue?: string;
   changeSource?: string;
+  /** New developer platform: generic object events carry the object type id (deal = 0-3). */
+  objectTypeId?: string;
+}
+
+/** Normalise new-platform "object.*" events for deals to the classic "deal.*" names. */
+export function normalizeSubscriptionType(e: Pick<HubSpotWebhookEventPayload, "subscriptionType" | "objectTypeId">): string {
+  if (e.subscriptionType.startsWith("object.") && e.objectTypeId === "0-3") return `deal.${e.subscriptionType.slice("object.".length)}`;
+  return e.subscriptionType;
 }
 
 export async function ingestWebhookEvents(events: HubSpotWebhookEventPayload[]): Promise<{ received: number; duplicates: number }> {
@@ -34,7 +42,7 @@ export async function ingestWebhookEvents(events: HubSpotWebhookEventPayload[]):
           portalId,
           eventId: String(e.eventId),
           organizationId: connection?.organizationId ?? null,
-          subscriptionType: e.subscriptionType.slice(0, 100),
+          subscriptionType: normalizeSubscriptionType(e).slice(0, 100),
           objectId: e.objectId !== undefined ? String(e.objectId) : null,
           propertyName: e.propertyName?.slice(0, 200) ?? null,
           propertyValue: e.propertyValue?.slice(0, 2000) ?? null,

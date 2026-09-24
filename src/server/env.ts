@@ -11,7 +11,7 @@ const schema = z.object({
   HUBSPOT_SCOPES: z
     .string()
     .default(
-      "oauth crm.objects.deals.read crm.objects.deals.write crm.objects.contacts.read crm.objects.companies.read crm.objects.line_items.read crm.objects.owners.read crm.schemas.deals.read e-commerce",
+      "oauth crm.objects.deals.read crm.objects.deals.write crm.objects.contacts.read crm.objects.companies.read crm.objects.line_items.read crm.objects.owners.read crm.schemas.deals.read crm.schemas.deals.write e-commerce",
     ),
   HUBSPOT_REDIRECT_URI: z.string().optional().default(""),
   HUBSPOT_API_BASE: z.string().url().default("https://api.hubapi.com"),

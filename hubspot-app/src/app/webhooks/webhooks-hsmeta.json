@@ -1,0 +1,16 @@
+{
+  "uid": "dealdocs_webhooks",
+  "type": "webhooks",
+  "config": {
+    "settings": {
+      "targetUrl": "https://app.dealdocs.example/api/integrations/hubspot/webhooks",
+      "maxConcurrentRequests": 10
+    },
+    "subscriptions": {
+      "crmObjects": [
+        { "subscriptionType": "object.propertyChange", "objectType": "deal", "propertyName": "dealname", "active": true },
+        { "subscriptionType": "object.deletion", "objectType": "deal", "active": true }
+      ]
+    }
+  }
+}

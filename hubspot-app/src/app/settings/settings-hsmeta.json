@@ -1,0 +1,7 @@
+{
+  "uid": "dealdocs_settings",
+  "type": "settings",
+  "config": {
+    "entrypoint": "/app/settings/Settings.jsx"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "uid": "dealdocs_deal_card",
+  "type": "card",
+  "config": {
+    "name": "DealDocs",
+    "description": "Quotes and contracts for this deal",
+    "location": "crm.record.sidebar",
+    "entrypoint": "/app/cards/DealDocsCard.jsx",
+    "objectTypes": ["deals"]
+  }
+}

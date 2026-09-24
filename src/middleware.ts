@@ -7,7 +7,7 @@ import { NextResponse, type NextRequest } from "next/server";
  *    (Server Actions have their own built-in origin check; HubSpot webhooks and the
  *    signed App Card endpoint are authenticated by HubSpot request signatures instead.)
  */
-const CSRF_EXEMPT = [/^\/api\/integrations\/hubspot\/webhooks/, /^\/api\/hubspot\/card/];
+const CSRF_EXEMPT = [/^\/api\/integrations\/hubspot\/webhooks/, /^\/api\/hubspot\/card/, /^\/api\/hubspot\/app-settings/];
 
 function sameOrigin(req: NextRequest): boolean {
   const origin = req.headers.get("origin") ?? req.headers.get("referer");
