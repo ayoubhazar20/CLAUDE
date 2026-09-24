@@ -483,7 +483,7 @@ async function renderBlock(block: ResolvedBlock, layout: Layout, pdf: PDFDocumen
                 layout.page.drawImage(img, { x: x + 10, y: lineY + 3, width: img.width * scale, height: img.height * scale });
               }
             } else {
-              layout.page.drawText(clean(s.signature.signatureData ?? s.name).slice(0, 60), { x: x + 10, y: lineY + 8, size: 18, font: f.boldItalic, color: INK });
+              layout.page.drawText(clean(s.signature.signatureData ?? s.name).slice(0, 60), { x: x + 10, y: lineY + 8, size: 18, font: f.italic, color: INK });
             }
           } else {
             layout.page.drawText("Awaiting signature", { x: x + 10, y: lineY + 6, size: 8, font: f.italic, color: MUTED });
@@ -586,13 +586,12 @@ export async function renderPdf(doc: ResolvedDocument, meta: PdfMeta, loader: Im
   const pdf = await PDFDocument.create();
   pdf.registerFontkit(fontkit);
   const bytes = await loadFontBytes();
-  const fonts: Fonts = {
-    regular: await pdf.embedFont(bytes.regular!, { subset: true }),
-    bold: await pdf.embedFont(bytes.bold!, { subset: true }),
-    italic: await pdf.embedFont(bytes.italic!, { subset: true }),
-    boldItalic: await pdf.embedFont(bytes.boldItalic!, { subset: true }),
-    semibold: await pdf.embedFont(bytes.semibold!, { subset: true }),
-  };
+  // Full embedding: pdf-lib's font subsetting drops glyphs with some fonts (renders blank text).
+  // Only fonts actually used are embedded; font streams are compressed.
+  const regular = await pdf.embedFont(bytes.regular!, { subset: false });
+  const bold = await pdf.embedFont(bytes.bold!, { subset: false });
+  const italic = await pdf.embedFont(bytes.italic!, { subset: false });
+  const fonts: Fonts = { regular, bold, italic, boldItalic: bold, semibold: bold };
   pdf.setTitle(`${meta.title} (${meta.number})`);
   pdf.setAuthor(meta.organizationName);
   pdf.setCreator("DealDocs");

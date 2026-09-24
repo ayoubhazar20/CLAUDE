@@ -132,7 +132,8 @@ export function formatDate(date: Date | null | undefined, timezone: string): str
 export function formatDateTime(date: Date | null | undefined, timezone: string): string {
   if (!date) return "";
   try {
-    return new Intl.DateTimeFormat("en-US", { dateStyle: "long", timeStyle: "short", timeZone: timezone, timeZoneName: "short" }).format(date);
+    // dateStyle/timeStyle cannot be combined with timeZoneName, so the zone is appended explicitly.
+    return `${new Intl.DateTimeFormat("en-US", { dateStyle: "long", timeStyle: "short", timeZone: timezone }).format(date)} (${timezone})`;
   } catch {
     return date.toISOString();
   }

@@ -10,7 +10,7 @@ import { appUrl } from "@/server/env";
 import { Badge, Card, DescriptionList, EmptyState, PageHeader, Table, Tabs, Td, Th } from "@/components/ui";
 import { StatusBadge } from "@/components/status-badge";
 import { DocumentFrame } from "@/components/document-frame";
-import { dateTimeLabel, money } from "@/lib/format";
+import { dateLabel, dateTimeLabel, money } from "@/lib/format";
 import { renderDocumentHtml } from "@/domain/render-html";
 import { DOCUMENT_TYPE_LABELS, STATUS_LABELS } from "@/domain/status";
 import { PERMISSIONS } from "@/domain/permissions";
@@ -143,7 +143,7 @@ export default async function DocumentPage({ params, searchParams }: { params: P
                 { label: "Owner", value: doc.owner.name },
                 { label: "Client", value: [doc.clientName, doc.clientCompany].filter(Boolean).join(" · ") || "—" },
                 { label: "Currency", value: doc.currency },
-                { label: "Expires", value: dateTimeLabel(doc.expiresAt, tz) },
+                { label: "Expires", value: dateLabel(doc.expiresAt, tz) },
                 { label: "Created", value: dateTimeLabel(doc.createdAt, tz) },
                 { label: "Published", value: dateTimeLabel(doc.firstPublishedAt, tz) },
                 { label: "Public link", value: doc.publishedVersionId ? <a href={appUrl(`/d/${doc.publicToken}`)} target="_blank" rel="noreferrer" className="break-all text-brand-700 underline">/d/{doc.publicToken.slice(0, 8)}…</a> : "Not published" },

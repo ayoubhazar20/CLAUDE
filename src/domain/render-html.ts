@@ -145,7 +145,7 @@ export const DOCUMENT_CSS = `
 .dd-h3{font-size:17px;font-weight:600}
 .dd-p{margin:0}
 .dd-align-center{text-align:center}.dd-align-right{text-align:right}
-.dd-rich p{margin:0 0 8px}.dd-rich ul,.dd-rich ol{margin:0 0 8px;padding-left:22px}.dd-rich h3{font-size:16px;margin:8px 0 4px}.dd-rich h4{font-size:15px;margin:8px 0 4px}
+.dd-rich p{margin:0 0 8px}.dd-rich ul,.dd-rich ol{margin:0 0 8px;padding-left:22px}.dd-rich ul{list-style:disc}.dd-rich ol{list-style:decimal}.dd-rich li{display:list-item}.dd-rich h3{font-size:16px;margin:8px 0 4px}.dd-rich h4{font-size:15px;margin:8px 0 4px}
 .dd-rich a{color:var(--dd-brand)}
 .dd-logo img{max-width:240px;object-fit:contain}
 .dd-image{margin:0}.dd-image img{max-width:100%;height:auto;border-radius:4px}.dd-w-small img{max-width:33%}.dd-w-medium img{max-width:60%}
