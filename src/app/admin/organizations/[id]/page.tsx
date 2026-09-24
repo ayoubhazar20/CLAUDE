@@ -14,7 +14,7 @@ export default async function AdminOrganization({ params }: { params: Promise<{ 
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const org = await prisma.organization.findUnique({
     where: { id },
-    include: { memberships: { include: { user: true, role: true } }, hubspotConnections: true, termsAcceptances: true, subscriptions: { include: { plan: true }, orderBy: { createdAt: "desc" } } },
+    include: { memberships: { include: { user: true, role: true } }, zapierIntegration: true, termsAcceptances: true, subscriptions: { include: { plan: true }, orderBy: { createdAt: "desc" } } },
   });
   if (!org) notFound();
   const [usage, plans, audit] = await Promise.all([
@@ -74,8 +74,14 @@ export default async function AdminOrganization({ params }: { params: Promise<{ 
           <Card title="Usage">
             <DescriptionList items={[{ label: "Active users", value: usage.users }, { label: "Documents this month", value: usage.documentsThisMonth }, { label: "Storage", value: `${Math.round(usage.storageBytes / 1024 / 1024)} MB` }]} />
           </Card>
-          <Card title="HubSpot">
-            {org.hubspotConnections.length ? org.hubspotConnections.map((c) => <p key={c.id} className="text-sm">Portal {c.portalId} · {c.status.toLowerCase()}{c.lastError ? <span className="block text-xs text-red-600">{c.lastError}</span> : null}</p>) : <p className="text-sm text-slate-500">Not connected</p>}
+          <Card title="HubSpot via Zapier">
+            {org.zapierIntegration ? (
+              <p className="text-sm">
+                {org.zapierIntegration.enabled ? "Enabled" : "Disabled"} · webhook {org.zapierIntegration.webhookUrl ? "set" : "missing"} · secret {org.zapierIntegration.secretPrefix ? "set" : "missing"}
+                <span className="block text-xs text-slate-500">Last success {dateTimeLabel(org.zapierIntegration.lastSuccessAt)}</span>
+                {org.zapierIntegration.lastError ? <span className="block text-xs text-red-600">{org.zapierIntegration.lastError}</span> : null}
+              </p>
+            ) : <p className="text-sm text-slate-500">Not configured</p>}
           </Card>
         </div>
       </div>

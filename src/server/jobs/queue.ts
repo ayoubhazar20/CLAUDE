@@ -10,8 +10,7 @@ export type JobType =
   | "email.send"
   | "pdf.generate"
   | "pdf.generateSigned"
-  | "hubspot.syncDocument"
-  | "hubspot.processWebhook"
+  | "zapier.deliver"
   | "notifications.email"
   | "documents.expireDue";
 

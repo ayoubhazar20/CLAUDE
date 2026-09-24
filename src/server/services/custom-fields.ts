@@ -48,16 +48,22 @@ export async function archiveCustomField(ctx: OrgContext, id: string) {
   await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "CUSTOM_FIELD_UPDATED", entityType: "CustomFieldDefinition", entityId: id, metadata: { archived: true } });
 }
 
-/** Complete variable catalogue for the picker: built-ins + custom fields + mapped HubSpot properties. */
+/**
+ * Complete variable catalogue for the picker: built-ins + custom fields + HubSpot
+ * custom properties (mapped in the Zapier settings, or seen in recent snapshots).
+ */
 export async function variableCatalog(organizationId: string): Promise<VariableDefinition[]> {
-  const [custom, mappings] = await Promise.all([
+  const [custom, integration, snapshots] = await Promise.all([
     prisma.customFieldDefinition.findMany({ where: { organizationId, archivedAt: null }, orderBy: { label: "asc" } }),
-    prisma.hubSpotPropertyMapping.findMany({ where: { organizationId, direction: "IMPORT", enabled: true }, orderBy: { variableKey: "asc" } }),
+    prisma.zapierIntegration.findUnique({ where: { organizationId } }),
+    prisma.dealSnapshot.findMany({ where: { organizationId }, orderBy: { receivedAt: "desc" }, take: 20, select: { payload: true } }),
   ]);
-  const builtinKeys = new Set(BUILTIN_VARIABLES.map((v) => v.key));
-  return [
-    ...BUILTIN_VARIABLES,
-    ...custom.map((c) => ({ key: c.key, label: c.label, group: "Custom" })),
-    ...mappings.filter((m) => !builtinKeys.has(m.variableKey)).map((m) => ({ key: m.variableKey, label: m.label ?? m.hubspotProperty, group: "HubSpot" })),
-  ];
+  const map = (integration?.propertyVariableMap ?? {}) as Record<string, string>;
+  const names = new Set<string>(Object.keys(map));
+  for (const s of snapshots) for (const k of Object.keys((s.payload as { customProperties?: Record<string, string> }).customProperties ?? {})) names.add(k);
+  const known = new Set([...BUILTIN_VARIABLES.map((v) => v.key), ...custom.map((c) => c.key)]);
+  const hubspot = [...names]
+    .map((name) => ({ key: map[name] || `hubspot.${name}`, label: name, group: "HubSpot" }))
+    .filter((v) => !known.has(v.key));
+  return [...BUILTIN_VARIABLES, ...custom.map((c) => ({ key: c.key, label: c.label, group: "Custom" })), ...hubspot];
 }

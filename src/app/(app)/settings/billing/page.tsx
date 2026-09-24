@@ -32,7 +32,6 @@ export default async function BillingPage() {
             <Meter label="Active users" used={usage.users} limit={plan?.maxUsers ?? null} />
             <Meter label="Documents created" used={usage.documentsThisMonth} limit={plan?.maxDocumentsPerMonth ?? null} />
             <Meter label="Storage" used={Math.round(usage.storageBytes / 1024 / 1024)} limit={plan?.maxStorageMb ?? null} unit=" MB" />
-            <Meter label="HubSpot connections" used={usage.hubspotConnections} limit={plan?.maxHubSpotConnections ?? null} />
           </div>
         </Card>
       </div>

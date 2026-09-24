@@ -1,8 +1,10 @@
 # DealDocs
 
-Multi-tenant quote & contract management SaaS integrated with HubSpot.
-Companies create quotes and contracts from HubSpot deals, customise them, publish a secure online
-version, collect OTP-verified acceptances and electronic signatures, and sync the outcome back to HubSpot.
+Multi-tenant quote & contract management SaaS connected to HubSpot through Zapier.
+Companies open DealDocs from a HubSpot deal, create quotes and contracts, customise them, publish a
+secure online version, collect OTP-verified acceptances and electronic signatures, and mirror the
+outcome back to HubSpot via Zapier. DealDocs never calls the HubSpot API and needs no HubSpot OAuth
+credentials.
 
 > Stack: Next.js 15 (App Router) · React 19 · TypeScript (strict) · PostgreSQL 16 · Prisma 6 ·
 > Zod · decimal.js · pdf-lib · Tailwind CSS 4 · Vitest
@@ -40,16 +42,18 @@ templates, a draft quote, a published quote and a signed contract (links printed
 
 ```bash
 createdb dealdocs_test             # once
-npm test                           # 68 tests: unit + integration against PostgreSQL
+npm test                           # 73 tests: unit + integration against PostgreSQL
 npm run typecheck
 ```
 
 `tests/acceptance-flow.test.ts` executes the complete **V1 acceptance scenario** (section 63 of the
-spec) end to end against a real database and a fake HubSpot API: registration → approval → OAuth →
-deal import → edits (HubSpot untouched) → locked content → autosave → publish → PDF → send →
-view tracking → OTP acceptance → HubSpot writeback & stage change → conversion to contract →
+spec) end to end against a real database and a fake Zapier/HubSpot: registration → approval →
+Zapier setup → document from a deal → deal snapshot via Zapier → edits → locked content → autosave →
+publish → PDF → send → view tracking → OTP acceptance → custom object & deal properties mirrored via
+Zapier (stage change by a HubSpot workflow) → conversion to contract →
 sequential signatures → immutable signed version → signed PDF → revision with the same link →
-history & audit logs.
+history & audit logs. `tests/zapier.test.ts` covers authentication, cross-organization isolation,
+retries without duplicate records, signatures, snapshot review and HubSpot updates.
 
 ---
 
@@ -64,7 +68,7 @@ src/
     security/    AES-256-GCM encryption, HMAC, scrypt passwords, DB-backed rate limiting
     services/    Auth, organizations, members/teams, roles, templates, billing, notifications…
     documents/   Access control, create/edit/publish/revise, send, public page, OTP, signing
-    hubspot/     OAuth, API client (token refresh), import, mapping, writeback, webhooks
+    integrations/ Zapier bridge: settings & secret, outbound event queue, inbound endpoints, deal snapshots
     pdf/         PDF renderer (same resolved block tree as the web page) + certificate
     email/       Provider abstraction (SMTP / log), layout, delivery tracking
     storage/     Storage abstraction (local private disk / S3-compatible), upload validation
@@ -72,9 +76,9 @@ src/
   app/           Next.js routes: (auth), (app) tenant UI, admin (platform), d/[token] (public), api
   components/    UI kit, editors (document editor, template builder, rich text, rule builder)
   worker/        Standalone background worker entry point
-hubspot-app/     HubSpot developer project: Deal App Card, settings page, webhooks
+hubspot-app/     HubSpot Deal card (links into DealDocs only, no API calls)
 prisma/          Schema, migrations (incl. immutability triggers), seed
-tests/           Vitest suites + fake HubSpot
+tests/           Vitest suites + fake Zapier/HubSpot
 ```
 
 ### Key design decisions
@@ -99,33 +103,39 @@ tests/           Vitest suites + fake HubSpot
 - **OTP** — 6 digits, 10-minute expiry, 5 attempts, resend cooldown, rate limits; only an HMAC bound to
   (challenge, document, version, recipient, email, action) is stored. A verified OTP yields a
   single-use grant consumed by the final action.
-- **HubSpot** — one OAuth connection per organization (schema supports several), tokens encrypted at
-  rest, refresh with row locking, v3 signature validation for webhooks and the App Card, idempotent
-  webhook ingestion, async writeback & pipeline automation. Stage ids are read live, never hardcoded.
-- **Async jobs** — emails, PDFs, HubSpot sync, webhook processing and expirations run through a
+- **HubSpot via Zapier** — DealDocs stores only the deal id, the custom object record id and the
+  object type id. Document lifecycle events go to a per-organization Zapier webhook through a durable
+  queue (HMAC-signed, retried, never duplicated: Zapier finds records by `dealdocs_document_id`).
+  Zapier calls back with a per-organization secret to link records, deliver deal snapshots and push
+  HubSpot changes. Snapshots never silently overwrite manual edits, and nothing from HubSpot can touch
+  locked versions, signatures, PDFs or audit history. Pipeline changes live in HubSpot workflows.
+  See [`docs/ZAPIER.md`](docs/ZAPIER.md).
+- **Async jobs** — emails, PDFs, Zapier deliveries and expirations run through a
   PostgreSQL queue (`FOR UPDATE SKIP LOCKED`, retries with backoff). Runs inline in the web process by
   default or as a separate worker (`npm run worker`); swappable for Redis/SQS later.
 - **Billing-ready** — plans, subscriptions, usage records and limit checks (users, documents/month,
-  storage, HubSpot connections) are data-driven; payments are not active in V1.
+  storage) are data-driven; payments are not active in V1.
 
 ### Security summary
 
 scrypt password hashing · hashed session tokens, httpOnly/SameSite cookies, idle + absolute expiry ·
 login lockout & rate limits · CSP with per-request nonce · CSRF (Server Actions origin check +
 same-origin check on mutating API routes) · Zod validation on every write · Prisma parameterised
-queries · HTML sanitisation of rich text (write and render) · AES-256-GCM encrypted OAuth tokens ·
-OAuth state validation · webhook signature validation · magic-byte upload validation, private storage,
+queries · HTML sanitisation of rich text (write and render) · AES-256-GCM encrypted integration secrets ·
+HMAC-signed outbound webhooks · hashed per-organization Zapier secrets · SSRF-restricted webhook hosts · magic-byte upload validation, private storage,
 download-only serving with `nosniff` · secrets never logged (audit scrubbing) · errors logged with
 trace ids, no stack traces shown to users.
 
 ---
 
-## HubSpot setup
+## HubSpot setup (via Zapier)
 
-1. Create a HubSpot public app (see `hubspot-app/README.md`) and upload the project with `hs project upload`.
-2. Set `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET` (and optionally `HUBSPOT_REDIRECT_URI`).
-3. In DealDocs: *Settings → HubSpot → Connect HubSpot*; then configure *Property mapping*
-   (use *Create DealDocs properties* for writeback) and *Pipeline automation*.
+1. Install the Deal card from `hubspot-app/` (buttons *Create Quote*, *Create Contract*,
+   *View Documents* — plain links to `APP_URL`).
+2. Create the *DealDocs Document* custom object in HubSpot (properties in `docs/ZAPIER.md`).
+3. In DealDocs: *Settings → HubSpot via Zapier*: object type id, Zapier catch-hook URL, generate the
+   integration secret, send a test event, enable.
+4. Build the Zaps described in [`docs/ZAPIER.md`](docs/ZAPIER.md).
 
 ## Environments & deployment
 

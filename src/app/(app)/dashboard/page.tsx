@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { requireOrgPage } from "@/server/auth/context";
+import { prisma } from "@/server/db";
 import { dashboardStats } from "@/server/documents/queries";
-import { primaryConnection } from "@/server/hubspot/client";
+import { getIntegration, isConfigured } from "@/server/integrations/config";
 import { Alert, ButtonLink, Card, EmptyState, PageHeader, Stat, Table, Td, Th } from "@/components/ui";
 import { StatusBadge } from "@/components/status-badge";
 import { money, relativeTime } from "@/lib/format";
@@ -12,7 +13,8 @@ export const metadata = { title: "Dashboard" };
 
 export default async function DashboardPage() {
   const ctx = await requireOrgPage();
-  const [stats, connection] = await Promise.all([dashboardStats(ctx), primaryConnection(ctx.organizationId)]);
+  const [stats, integration] = await Promise.all([dashboardStats(ctx), getIntegration(ctx.organizationId)]);
+  const failing = await prisma.syncEvent.count({ where: { organizationId: ctx.organizationId, status: "FAILED", createdAt: { gte: new Date(Date.now() - 7 * 86400_000) } } });
   const canCreate = ctx.permissions.has(PERMISSIONS.DOCUMENTS_CREATE) && !ctx.isSupportView;
   const c = stats.cards;
   return (
@@ -22,19 +24,21 @@ export default async function DashboardPage() {
         description="Your quotes and contracts at a glance."
         actions={canCreate ? <ButtonLink href="/documents/new">+ New document</ButtonLink> : null}
       />
-      {!connection ? (
+      {!isConfigured(integration) ? (
         <div className="mb-6">
-          <Alert tone="warning" title="HubSpot is not connected">
-            {ctx.permissions.has(PERMISSIONS.HUBSPOT_MANAGE) ? (
-              <>Connect HubSpot to create documents from your deals. <Link className="font-semibold underline" href="/settings/integrations/hubspot">Connect now</Link></>
+          <Alert tone="warning" title="HubSpot sync is not set up">
+            {ctx.permissions.has(PERMISSIONS.INTEGRATIONS_MANAGE) ? (
+              <>Documents are not mirrored to HubSpot yet. <Link className="font-semibold underline" href="/settings/integrations/zapier">Configure HubSpot via Zapier</Link></>
             ) : (
-              <>Ask a Company Admin to connect HubSpot so documents can be created from deals.</>
+              <>Ask a Company Admin to configure HubSpot via Zapier so documents appear in HubSpot.</>
             )}
           </Alert>
         </div>
-      ) : connection.status === "ERROR" ? (
+      ) : failing > 0 && ctx.permissions.has(PERMISSIONS.INTEGRATIONS_MANAGE) ? (
         <div className="mb-6">
-          <Alert tone="error" title="HubSpot connection needs attention">{connection.lastError ?? "Reconnect HubSpot to resume synchronization."}</Alert>
+          <Alert tone="error" title="Some HubSpot updates failed">
+            {failing} event{failing > 1 ? "s" : ""} could not be delivered to Zapier this week. <Link className="font-semibold underline" href="/settings/integrations/zapier/log?tab=events">Review and retry</Link>
+          </Alert>
         </div>
       ) : null}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">

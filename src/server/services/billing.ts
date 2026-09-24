@@ -5,7 +5,7 @@ import { AppError } from "../errors";
  * Billing-ready foundations. Payments are not active in V1, but plan limits and
  * usage are modelled so enforcement is data-driven (no hardcoded tiers).
  */
-export type LimitKind = "users" | "documents" | "storage" | "hubspotConnections";
+export type LimitKind = "users" | "documents" | "storage";
 
 export const USAGE_METRICS = {
   DOCUMENT_CREATED: "DOCUMENT_CREATED",
@@ -33,13 +33,12 @@ export async function recordUsage(organizationId: string, metric: keyof typeof U
 }
 
 export async function currentUsage(organizationId: string, tx: Tx = prisma) {
-  const [users, documents, storage, hubspot] = await Promise.all([
+  const [users, documents, storage] = await Promise.all([
     tx.organizationMembership.count({ where: { organizationId, status: "ACTIVE" } }),
     tx.document.count({ where: { organizationId, createdAt: { gte: monthStart() } } }),
     tx.storedFile.aggregate({ where: { organizationId }, _sum: { size: true } }),
-    tx.hubSpotConnection.count({ where: { organizationId, status: "CONNECTED" } }),
   ]);
-  return { users, documentsThisMonth: documents, storageBytes: storage._sum.size ?? 0, hubspotConnections: hubspot };
+  return { users, documentsThisMonth: documents, storageBytes: storage._sum.size ?? 0 };
 }
 
 export class PlanLimitError extends AppError {
@@ -64,10 +63,6 @@ export async function assertWithinLimit(organizationId: string, kind: LimitKind,
       if (plan.maxStorageMb !== null && usage.storageBytes + extraBytes > plan.maxStorageMb * 1024 * 1024)
         throw new PlanLimitError(`Your plan includes ${plan.maxStorageMb} MB of storage.`);
       break;
-    case "hubspotConnections":
-      if (plan.maxHubSpotConnections !== null && usage.hubspotConnections >= plan.maxHubSpotConnections)
-        throw new PlanLimitError(`Your plan allows ${plan.maxHubSpotConnections} HubSpot connection(s).`);
-      break;
   }
 }
 
@@ -78,10 +73,10 @@ export async function hasFeature(organizationId: string, feature: string): Promi
 
 /** Default plan catalogue (inserted by the seed / bootstrap script — editable by platform admins). */
 export const DEFAULT_PLANS = [
-  { key: "free", name: "Free", maxUsers: 3, maxDocumentsPerMonth: 25, maxStorageMb: 500, maxHubSpotConnections: 1, features: ["quotes", "contracts"], isDefault: false, sortOrder: 0 },
-  { key: "starter", name: "Starter", maxUsers: 10, maxDocumentsPerMonth: 250, maxStorageMb: 5000, maxHubSpotConnections: 1, features: ["quotes", "contracts", "pipeline_automation"], isDefault: false, sortOrder: 1 },
-  { key: "professional", name: "Professional", maxUsers: 50, maxDocumentsPerMonth: 2000, maxStorageMb: 25000, maxHubSpotConnections: 1, features: ["*"], isDefault: true, sortOrder: 2 },
-  { key: "enterprise", name: "Enterprise", maxUsers: null, maxDocumentsPerMonth: null, maxStorageMb: null, maxHubSpotConnections: 5, features: ["*"], isDefault: false, sortOrder: 3 },
+  { key: "free", name: "Free", maxUsers: 3, maxDocumentsPerMonth: 25, maxStorageMb: 500, features: ["quotes", "contracts"], isDefault: false, sortOrder: 0 },
+  { key: "starter", name: "Starter", maxUsers: 10, maxDocumentsPerMonth: 250, maxStorageMb: 5000, features: ["quotes", "contracts", "pipeline_automation"], isDefault: false, sortOrder: 1 },
+  { key: "professional", name: "Professional", maxUsers: 50, maxDocumentsPerMonth: 2000, maxStorageMb: 25000, features: ["*"], isDefault: true, sortOrder: 2 },
+  { key: "enterprise", name: "Enterprise", maxUsers: null, maxDocumentsPerMonth: null, maxStorageMb: null, features: ["*"], isDefault: false, sortOrder: 3 },
 ];
 
 export async function ensureDefaultPlans(tx: Tx = prisma) {

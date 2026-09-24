@@ -42,45 +42,10 @@ enum MembershipStatus {
   DISABLED
 }
 
-enum HubSpotConnectionStatus {
-  CONNECTED
-  DISCONNECTED
-  ERROR
-}
 
-enum HubSpotObjectType {
-  DEAL
-  CONTACT
-  COMPANY
-  LINE_ITEM
-  PRODUCT
-  OWNER
-}
 
-enum MappingDirection {
-  IMPORT
-  WRITEBACK
-}
 
-enum AutomationEvent {
-  QUOTE_PUBLISHED
-  QUOTE_SENT
-  QUOTE_VIEWED
-  QUOTE_ACCEPTED
-  QUOTE_REJECTED
-  CONTRACT_PUBLISHED
-  CONTRACT_SENT
-  CONTRACT_VIEWED
-  CONTRACT_SIGNED
-  CONTRACT_REJECTED
-}
 
-enum WebhookEventStatus {
-  RECEIVED
-  PROCESSED
-  FAILED
-  IGNORED
-}
 
 enum DocumentType {
   QUOTE
@@ -362,9 +327,7 @@ model Organization {
   invitations           Invitation[]
   teams                 Team[]
   roles                 Role[]
-  hubspotConnections    HubSpotConnection[]
-  propertyMappings      HubSpotPropertyMapping[]
-  pipelineMappings      HubSpotPipelineMapping[]
+  zapierIntegration     ZapierIntegration?
   templates             Template[]
   documents             Document[]
   customFieldDefinitions CustomFieldDefinition[]
@@ -483,109 +446,10 @@ model TeamMembership {
   @@map("team_memberships")
 }
 
-// ───────────────────────────── HubSpot ─────────────────────────────
 
-model HubSpotConnection {
-  id              String                  @id @default(uuid()) @db.Uuid
-  organizationId  String                  @db.Uuid
-  portalId        String
-  hubDomain       String?
-  // OAuth tokens are AES-256-GCM encrypted at rest (see src/server/security/crypto.ts).
-  accessTokenEnc  String
-  refreshTokenEnc String
-  expiresAt       DateTime
-  scopes          String[]
-  installedById   String?                 @db.Uuid
-  installedAt     DateTime                @default(now())
-  status          HubSpotConnectionStatus @default(CONNECTED)
-  isPrimary       Boolean                 @default(true)
-  lastError       String?
-  lastErrorAt     DateTime?
-  disconnectedAt  DateTime?
-  // Sync options (default behaviour, writeback on/off …)
-  settings        Json                    @default("{}")
-  createdAt       DateTime                @default(now())
-  updatedAt       DateTime                @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  @@unique([organizationId, portalId])
-  @@index([portalId])
-  @@map("hubspot_connections")
-}
 
-model OAuthState {
-  id             String    @id @default(uuid()) @db.Uuid
-  stateHash      String    @unique
-  organizationId String    @db.Uuid
-  userId         String    @db.Uuid
-  redirectTo     String?
-  expiresAt      DateTime
-  usedAt         DateTime?
-  createdAt      DateTime  @default(now())
-
-  @@map("oauth_states")
-}
-
-model HubSpotPropertyMapping {
-  id              String            @id @default(uuid()) @db.Uuid
-  organizationId  String            @db.Uuid
-  objectType      HubSpotObjectType
-  hubspotProperty String
-  // DealDocs variable key, e.g. "deal.name" or "project.startDate".
-  variableKey     String
-  direction       MappingDirection  @default(IMPORT)
-  label           String?
-  enabled         Boolean           @default(true)
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-
-  @@unique([organizationId, direction, objectType, hubspotProperty, variableKey])
-  @@map("hubspot_property_mappings")
-}
-
-model HubSpotPipelineMapping {
-  id             String          @id @default(uuid()) @db.Uuid
-  organizationId String          @db.Uuid
-  event          AutomationEvent
-  pipelineId     String
-  pipelineLabel  String?
-  stageId        String
-  stageLabel     String?
-  enabled        Boolean         @default(true)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-
-  @@unique([organizationId, event, pipelineId])
-  @@map("hubspot_pipeline_mappings")
-}
-
-model HubSpotWebhookEvent {
-  id               String             @id @default(uuid()) @db.Uuid
-  portalId         String
-  eventId          String
-  organizationId   String?            @db.Uuid
-  subscriptionType String
-  objectId         String?
-  propertyName     String?
-  propertyValue    String?
-  occurredAt       DateTime?
-  payload          Json
-  status           WebhookEventStatus @default(RECEIVED)
-  attempts         Int                @default(0)
-  error            String?
-  receivedAt       DateTime           @default(now())
-  processedAt      DateTime?
-
-  // Idempotency: HubSpot may deliver the same event more than once.
-  @@unique([portalId, eventId])
-  @@index([status])
-  @@map("hubspot_webhook_events")
-}
 
 // ───────────────────────────── Templates ─────────────────────────────
 
@@ -717,10 +581,16 @@ model Document {
   createdById        String         @db.Uuid
   templateId         String?        @db.Uuid
   templateVersionId  String?        @db.Uuid
-  hubspotConnectionId String?       @db.Uuid
-  hubspotPortalId    String?
+  // HubSpot identifiers only — all CRM data arrives through Zapier (no direct HubSpot API access).
   hubspotDealId      String?
   hubspotDealName    String?
+  /// Record id of the HubSpot custom object mirroring this document (returned by Zapier).
+  hubspotObjectRecordId String?
+  hubspotLinkedAt    DateTime?
+  /// NOT_REQUESTED | REQUESTED | APPLIED | PENDING_REVIEW
+  dealDataStatus     String         @default("NOT_REQUESTED")
+  dealDataRequestedAt DateTime?
+  lastSyncAt         DateTime?
   isPrimary          Boolean        @default(false)
   currency           String
   acceptanceMode     AcceptanceMode @default(ACCEPTANCE_ONLY)
@@ -776,12 +646,15 @@ model Document {
   signatures      Signature[]
   views           DocumentView[]
   customFieldValues CustomFieldValue[]
+  dealSnapshots   DealSnapshot[]
+  syncEvents      SyncEvent[]
   relationshipsFrom DocumentRelationship[] @relation("RelSource")
   relationshipsTo   DocumentRelationship[] @relation("RelTarget")
 
   @@unique([organizationId, number])
   @@index([organizationId, type, status])
   @@index([organizationId, hubspotDealId])
+  @@index([organizationId, hubspotObjectRecordId])
   @@index([organizationId, ownerId])
   @@index([organizationId, createdAt])
   @@map("documents")
@@ -1212,7 +1085,6 @@ model Plan {
   maxUsers             Int?
   maxDocumentsPerMonth Int?
   maxStorageMb         Int?
-  maxHubSpotConnections Int?    @default(1)
   features             String[]
   priceMonthly         Decimal? @db.Decimal(12, 2)
   currency             String   @default("USD")
@@ -1261,4 +1133,122 @@ model UsageRecord {
 
   @@index([organizationId, metric, periodStart])
   @@map("usage_records")
+}
+
+// ───────────────────────────── HubSpot via Zapier ─────────────────────────────
+//
+// DealDocs never calls HubSpot directly. Outbound document events are POSTed to the
+// organization's Zapier webhook; Zapier calls back with CRM snapshots and record ids.
+
+enum SyncEventStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+}
+
+enum SyncDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum SnapshotStatus {
+  APPLIED
+  PENDING_REVIEW
+  DISMISSED
+}
+
+model ZapierIntegration {
+  id                    String    @id @default(uuid()) @db.Uuid
+  organizationId        String    @unique @db.Uuid
+  enabled               Boolean   @default(true)
+  /// HubSpot custom object type id (e.g. 2-12345678). Falls back to HUBSPOT_DOCUMENT_OBJECT_TYPE_ID.
+  hubspotObjectTypeId   String?
+  /// Zapier "Catch Hook" URL receiving outbound events.
+  webhookUrl            String?
+  /// Integration secret: HMAC for lookup/verification + encrypted copy for signing outbound events.
+  secretHash            String?   @unique
+  secretEnc             String?
+  secretPrefix          String?
+  secretRotatedAt       DateTime?
+  /// Optional overrides: DealDocs deal-property key → HubSpot deal property name.
+  dealPropertyNames     Json      @default("{}")
+  /// Optional overrides: DealDocs status → value written to HubSpot.
+  statusMapping         Json      @default("{}")
+  /// Optional: HubSpot custom property name → DealDocs variable key.
+  propertyVariableMap   Json      @default("{}")
+  lastSuccessAt         DateTime?
+  lastErrorAt           DateTime?
+  lastError             String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("zapier_integrations")
+}
+
+/// Outbound events queued for delivery to Zapier (retried until success).
+model SyncEvent {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+  documentId     String?         @db.Uuid
+  eventType      String
+  /// Event facts captured when it happened; the document state is rebuilt at delivery.
+  payload        Json            @default("{}")
+  status         SyncEventStatus @default(PENDING)
+  attempts       Int             @default(0)
+  responseStatus Int?
+  lastError      String?
+  nextAttemptAt  DateTime?
+  deliveredAt    DateTime?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  document Document? @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, createdAt])
+  @@index([status])
+  @@map("sync_events")
+}
+
+/// Human-readable synchronization log (outbound deliveries and inbound Zapier calls).
+model SyncLog {
+  id             String        @id @default(uuid()) @db.Uuid
+  organizationId String?       @db.Uuid
+  direction      SyncDirection
+  eventType      String
+  documentId     String?       @db.Uuid
+  syncEventId    String?       @db.Uuid
+  success        Boolean
+  message        String
+  /// Idempotency key supplied by Zapier on inbound calls (optional).
+  externalId     String?
+  details        Json          @default("{}")
+  ip             String?
+  createdAt      DateTime      @default(now())
+
+  @@unique([organizationId, direction, externalId])
+  @@index([organizationId, createdAt])
+  @@map("sync_logs")
+}
+
+/// CRM snapshot delivered by Zapier for a document (deal, contact, company, line items…).
+model DealSnapshot {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @db.Uuid
+  documentId     String         @db.Uuid
+  dealId         String?
+  /// INITIAL or REFRESH
+  kind           String
+  status         SnapshotStatus
+  payload        Json
+  receivedAt     DateTime       @default(now())
+  resolvedAt     DateTime?
+  resolvedById   String?        @db.Uuid
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@index([documentId, receivedAt])
+  @@map("deal_snapshots")
 }

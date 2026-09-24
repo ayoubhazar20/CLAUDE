@@ -1,37 +1,32 @@
-# DealDocs — HubSpot app project
+# DealDocs — HubSpot card project
 
-HubSpot developer-platform project (platform version 2025.2) containing:
+HubSpot developer project (platform 2025.2) containing only the **DealDocs card** on the Deal record.
 
-| Component | Path | Purpose |
-|-----------|------|---------|
-| App (OAuth, scopes, permitted URLs) | `src/app/app-hsmeta.json` | Public app installed per customer portal |
-| Deal sidebar card **DealDocs** | `src/app/cards/` | Lists the deal's quotes/contracts, "+ Create Document" → Quote / Contract opens DealDocs with the deal preloaded |
-| App settings page | `src/app/settings/` | Connection status + deep links into DealDocs |
-| Webhooks | `src/app/webhooks/webhooks-hsmeta.json` | Deal name changes / deletions → DealDocs |
+The card shows three actions and passes the Deal record ID to DealDocs:
 
-## Before uploading
+| Action | Opens |
+|--------|-------|
+| + Create Quote | `https://<dealdocs>/documents/new?type=quote&dealId=<dealId>` |
+| + Create Contract | `https://<dealdocs>/documents/new?type=contract&dealId=<dealId>` |
+| View Documents | `https://<dealdocs>/deals/<dealId>/documents` |
 
-Replace `https://app.dealdocs.example` with your DealDocs URL in:
+It makes **no HubSpot API calls and holds no credentials**. DealDocs never uses HubSpot OAuth:
+all CRM data flows through Zapier (see `docs/ZAPIER.md` in the main repository). If the user is not
+signed in to DealDocs, DealDocs asks them to log in and then returns to the requested page.
 
-- `src/app/config.js`
-- `src/app/app-hsmeta.json` (`redirectUrls`, `permittedUrls`)
-- `src/app/webhooks/webhooks-hsmeta.json` (`targetUrl`)
+## Setup
 
-The redirect URL must equal `HUBSPOT_REDIRECT_URI` (or `APP_URL/api/integrations/hubspot/callback`) on the server,
-and the app's client id / secret go into `HUBSPOT_CLIENT_ID` / `HUBSPOT_CLIENT_SECRET`.
-
-## Upload
+1. Replace `https://app.dealdocs.example` in `src/app/config.js` with your DealDocs URL.
+2. Install the CLI and upload:
 
 ```bash
 npm install -g @hubspot/cli
-hs account auth            # authenticate your developer account
+hs account auth
 cd hubspot-app
 hs project upload
 ```
 
-Security: the card and settings page call DealDocs with `hubspot.fetch`, which signs every request
-(`X-HubSpot-Signature-v3`). DealDocs verifies the signature with the app client secret and maps the
-portal id to the connected organization. No OAuth tokens are ever exposed to the card.
+3. In HubSpot, add the card to the Deal record's sidebar (Settings → Objects → Deals → Record customization).
 
-The HubSpot platform evolves quickly; if `hs project upload` reports schema differences, compare the
-`*-hsmeta.json` files with the current HubSpot developer documentation for your platform version.
+If `hs project upload` reports schema differences, compare the `*-hsmeta.json` files with the current
+HubSpot developer documentation for your platform version.

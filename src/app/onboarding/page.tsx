@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { requireOrgPage } from "@/server/auth/context";
 import { prisma } from "@/server/db";
-import { primaryConnection } from "@/server/hubspot/client";
+import { getIntegration, isConfigured } from "@/server/integrations/config";
 import { listAssignableRoles } from "@/server/services/roles";
 import { ONBOARDING_STEPS, type OnboardingStep } from "@/server/services/organizations";
 import { Alert, ButtonLink, cn } from "@/components/ui";
@@ -17,9 +17,9 @@ export const metadata = { title: "Welcome to DealDocs" };
 const TITLES: Record<OnboardingStep, string> = {
   profile: "Company profile",
   branding: "Branding",
-  hubspot: "Connect HubSpot",
+  hubspot: "HubSpot via Zapier",
   currency: "Default currency",
-  pipeline: "Pipeline mapping",
+  pipeline: "Pipeline automation",
   templates: "Templates",
   team: "Invite your team",
   ready: "Ready",
@@ -39,24 +39,24 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
   if (step === "profile") body = <ProfileForm defaults={org} onboardingStep="profile" />;
   if (step === "branding") body = <BrandingForm brandColor={org.brandColor} logoFileId={org.logoFileId} onboarding />;
   if (step === "hubspot") {
-    const connection = await primaryConnection(ctx.organizationId);
-    body = connection ? (
-      <Alert tone="success" title="HubSpot connected">Portal {connection.portalId} ({connection.hubDomain ?? "HubSpot"}).</Alert>
+    const integration = await getIntegration(ctx.organizationId);
+    body = isConfigured(integration) ? (
+      <Alert tone="success" title="HubSpot sync configured">Documents are mirrored to HubSpot through your Zapier webhook.</Alert>
     ) : (
-      <div className="space-y-3">
-        <p className="text-sm text-slate-600">Connect your HubSpot portal so DealDocs appears on your deals and can import clients and products.</p>
-        <ButtonLink href="/api/integrations/hubspot/install?redirectTo=/onboarding?step=hubspot" prefetch={false}>Connect HubSpot</ButtonLink>
+      <div className="space-y-3 text-sm text-slate-600">
+        <p>DealDocs connects to HubSpot through Zapier: each quote or contract becomes a HubSpot custom object record associated to its deal, and deal data (contacts, company, line items) is sent back to DealDocs.</p>
+        <p>Enter your HubSpot custom object type ID and Zapier webhook URL, and generate the integration secret for Zapier.</p>
+        <ButtonLink href="/settings/integrations/zapier">Configure HubSpot via Zapier</ButtonLink>
       </div>
     );
   }
   if (step === "currency") body = <CurrencyForm current={org.defaultCurrency} />;
   if (step === "pipeline") {
-    const count = await prisma.hubSpotPipelineMapping.count({ where: { organizationId: ctx.organizationId } });
     body = (
       <div className="space-y-3 text-sm text-slate-600">
-        <p>Choose which HubSpot deal stage each DealDocs event should move deals to (e.g. Quote Accepted → “Quote accepted”, Contract Signed → “Closed won”).</p>
-        <p>{count} rule{count === 1 ? "" : "s"} configured.</p>
-        <ButtonLink variant="secondary" href="/settings/integrations/hubspot/pipeline">Configure pipeline automation</ButtonLink>
+        <p>Deal stages are moved outside DealDocs, so your HubSpot pipelines stay under your control. DealDocs sends events such as <code>DOCUMENT_SIGNED</code> and suggested deal properties such as <code>latest_contract_status</code>.</p>
+        <p>Either add a “Update deal stage” step in your Zap, or create a HubSpot workflow — for example: when <code>latest_contract_status</code> is <code>signed</code>, move the deal to Closed Won.</p>
+        <ButtonLink variant="secondary" href="/settings/integrations/zapier">Open integration settings</ButtonLink>
       </div>
     );
   }

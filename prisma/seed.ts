@@ -110,9 +110,10 @@ async function main() {
   const pricing = { globalDiscountType: "NONE" as const, globalDiscountValue: "0", taxes: [{ key: "vat", name: "VAT", rate: "20" }], fees: [] };
 
   async function makeDoc(ctx: typeof adminCtx, type: "QUOTE" | "CONTRACT", templateId: string, title: string) {
-    const doc = await createDocument(ctx, { type, templateId });
+    // Zapier is not configured in the demo, so no deal data is requested — the snapshot is written directly.
+    const doc = await createDocument(ctx, { type, templateId, hubspotDealId: "9001" });
     const version = await prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.draftVersionId! } });
-    await prisma.document.update({ where: { id: doc.id }, data: { hubspotDealId: "9001", hubspotDealName: "Atlas — Fleet tracking rollout" } });
+    await prisma.document.update({ where: { id: doc.id }, data: { hubspotDealName: "Atlas — Fleet tracking rollout" } });
     await saveDraft(ctx, doc.id, { baseUpdatedAt: version.updatedAt.toISOString(), title, data: dealData(version.data), pricingConfig: pricing, lineItems: products() });
     return doc;
   }

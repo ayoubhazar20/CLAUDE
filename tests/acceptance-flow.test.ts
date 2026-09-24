@@ -4,24 +4,23 @@ import { prisma } from "@/server/db";
 import { buildOrgContext, type OrgContext } from "@/server/auth/context";
 import { registerUser, verifyEmail, authenticate } from "@/server/services/auth";
 import { createOrganization, approveOrganization } from "@/server/services/organizations";
-import { setHubSpotFetch } from "@/server/hubspot/client";
-import { createAuthorizeUrl, completeOAuth } from "@/server/hubspot/oauth";
-import { upsertPipelineMapping, upsertPropertyMapping, installWritebackProperties } from "@/server/hubspot/settings";
+import { rotateIntegrationSecret, saveIntegrationSettings } from "@/server/integrations/config";
+import { setZapierFetch } from "@/server/integrations/outbound";
 import { createDocument, saveDraft, publishDocument, convertQuoteToContract, createRevision } from "@/server/documents/service";
 import { getEmailDraft, sendDocument } from "@/server/documents/send";
 import { loadPublicView, recordView } from "@/server/documents/public";
 import { acceptQuote, requestActionCode, signDocument, verifyActionCode } from "@/server/documents/signing";
 import { parseBlocks } from "@/domain/blocks";
 import { parseDocumentData } from "@/domain/document-data";
-import { FakeHubSpot } from "./fake-hubspot";
+import { FakeZapier } from "./fake-zapier";
 import { META, createUser, lastCode, processJobs, resetDatabase, useOutbox } from "./helpers";
 
 const CLIENT_META = { ip: "198.51.100.7", userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Mobile/15E148" };
 const TINY_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAYCAYAAABKtPtEAAAA1klEQVR4nO2YUQ6AIAxDdwgP5v0vo/HDBFEEZtthtAlfhrV7GFy05eOy6ADR+gEozaZpPqwRJAGQNz4KiM2bDqDWfBSE3ZcKoNZkFITUkwagpzElgDwXBYDnVBUQrnLBATx5pZkQSrloAJ7sRUO4q2tIM0R4BoS7eoYyQ4ZW1oIAUJ8asoYhzFiXl+I+sXyDMmRr7d76PftOAN7w7UbmOnwGPdObYoJr9fJkOs0Bb5jfPc9LuhyE8iZLSy1GruIkOFrzLbk8qo7CozSeCnkg/z/B6ADRWgGz1AWLlP3ARgAAAABJRU5ErkJggg==";
 
-describe("V1 acceptance scenario (section 63)", () => {
-  const hubspot = new FakeHubSpot();
+describe("V1 acceptance scenario (section 63, HubSpot via Zapier)", () => {
+  const zapier = new FakeZapier();
   const outbox = useOutbox();
   let adminCtx: OrgContext;
   let organizationId: string;
@@ -30,8 +29,8 @@ describe("V1 acceptance scenario (section 63)", () => {
 
   beforeAll(async () => {
     await resetDatabase();
-    hubspot.seedDeal();
-    setHubSpotFetch(hubspot.fetch);
+    zapier.seedDeal();
+    setZapierFetch(zapier.fetch);
   });
 
   it("company registers, verifies email and submits its company", async () => {
@@ -74,37 +73,49 @@ describe("V1 acceptance scenario (section 63)", () => {
     expect(adminCtx.roleKey).toBe("admin");
   });
 
-  it("admin connects HubSpot through OAuth with state validation; tokens are encrypted", async () => {
-    const url = new URL(await createAuthorizeUrl(adminCtx));
-    const state = url.searchParams.get("state")!;
-    await expect(completeOAuth({ code: "c", state: "forged", currentUserId: adminCtx.user.id, ip: null, userAgent: null })).rejects.toThrow(/invalid|expired/i);
-    const { connection } = await completeOAuth({ code: "auth-code", state, currentUserId: adminCtx.user.id, ip: META.ip, userAgent: META.userAgent });
-    expect(connection.portalId).toBe(hubspot.portalId);
-    expect(connection.accessTokenEnc).not.toContain(hubspot.accessToken);
-    expect(connection.refreshTokenEnc).not.toContain(hubspot.refreshToken);
-    // State is single-use.
-    await expect(completeOAuth({ code: "c", state, currentUserId: adminCtx.user.id, ip: null, userAgent: null })).rejects.toThrow();
-
-    await upsertPropertyMapping(adminCtx, { objectType: "DEAL", hubspotProperty: "project_start_date", variableKey: "project.startDate", direction: "IMPORT" });
-    await installWritebackProperties(adminCtx);
-    await upsertPipelineMapping(adminCtx, { event: "QUOTE_ACCEPTED", pipelineId: "default", stageId: "quote_accepted" });
-    await upsertPipelineMapping(adminCtx, { event: "CONTRACT_SIGNED", pipelineId: "default", stageId: "closedwon" });
-    await expect(upsertPipelineMapping(adminCtx, { event: "QUOTE_PUBLISHED", pipelineId: "default", stageId: "does-not-exist" })).rejects.toThrow();
+  it("admin configures HubSpot via Zapier (no HubSpot OAuth); the secret is never stored in clear", async () => {
+    zapier.secret = await rotateIntegrationSecret(adminCtx);
+    await saveIntegrationSettings(adminCtx, {
+      enabled: true,
+      hubspotObjectTypeId: "2-12345678",
+      webhookUrl: zapier.webhookUrl,
+      dealPropertyNames: {},
+      statusMapping: {},
+      propertyVariableMap: { project_start_date: "project.startDate" },
+    });
+    const integration = await prisma.zapierIntegration.findUniqueOrThrow({ where: { organizationId } });
+    expect(integration.secretHash).not.toContain(zapier.secret);
+    expect(integration.secretEnc).not.toContain(zapier.secret);
+    await expect(saveIntegrationSettings(adminCtx, { enabled: true, hubspotObjectTypeId: "", webhookUrl: "https://evil.example/hook", dealPropertyNames: {}, statusMapping: {}, propertyVariableMap: {} })).rejects.toThrow(/Webhook host/);
   });
 
-  it("user creates a quote from the HubSpot deal; data is imported", async () => {
+  it("HubSpot card → user creates a quote for the deal; Zapier creates the custom object and returns the deal snapshot", async () => {
     const template = await prisma.template.findFirstOrThrow({ where: { organizationId, documentType: "QUOTE", isDefault: true } });
-    const doc = await createDocument(adminCtx, { type: "QUOTE", templateId: template.id, hubspotDealId: "9001", contactId: "501" });
+    const doc = await createDocument(adminCtx, { type: "QUOTE", templateId: template.id, hubspotDealId: "9001" });
     quoteId = doc.id;
     expect(doc.number).toMatch(/^Q-\d{4}-000001$/);
     expect(doc.hubspotDealId).toBe("9001");
-    const version = await prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.draftVersionId! } });
+    await processJobs();
+
+    // DOCUMENT_CREATED → one custom object record, associated to the deal, linked back to DealDocs.
+    const created = zapier.received.find((p) => p.event === "DOCUMENT_CREATED")!;
+    expect(created.hubspot_object_type_id).toBe("2-12345678");
+    expect(created.idempotency_key).toBe(doc.id);
+    expect(created.document).toMatchObject({ dealdocs_document_id: doc.id, document_type: "quote", document_status: "draft", hubspot_deal_id: "9001", document_url: null });
+    const [recordId, record] = zapier.recordFor(doc.id)!;
+    expect(record.associatedDealId).toBe("9001");
+    const linked = await prisma.document.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(linked.hubspotObjectRecordId).toBe(recordId);
+
+    // DEAL_DATA_REQUESTED → snapshot imported into the untouched draft.
+    expect(linked.dealDataStatus).toBe("APPLIED");
+    expect(linked.hubspotDealName).toBe("ACME Expansion");
+    const version = await prisma.documentVersion.findUniqueOrThrow({ where: { id: linked.draftVersionId! } });
     const data = parseDocumentData(version.data);
     expect(data.contact.firstName).toBe("Amina");
     expect(data.company.name).toBe("Client Co");
     expect(data.deal.name).toBe("ACME Expansion");
     expect(data.deal.owner.name).toBe("Sara Owner");
-    expect(data.deal.stage).toBe("Appointment scheduled");
     expect(data.hubspotProperties["project.startDate"]).toBe("2026-10-15");
     expect(data.recipients[0]).toMatchObject({ email: "amina@client.test", role: "SIGNER" });
     const lines = await prisma.documentLineItem.findMany({ where: { versionId: version.id }, orderBy: { position: "asc" } });
@@ -117,7 +128,7 @@ describe("V1 acceptance scenario (section 63)", () => {
     const doc = await prisma.document.findUniqueOrThrow({ where: { id: quoteId } });
     const version = await prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.draftVersionId! } });
     const lines = await prisma.documentLineItem.findMany({ where: { versionId: version.id }, orderBy: { position: "asc" } });
-    const writesBefore = hubspot.writes.filter((w) => w.method === "PATCH").length;
+    const snapshotBefore = JSON.stringify(zapier.deals["9001"]!.snapshot);
 
     const toInput = (l: (typeof lines)[number]) => ({
       id: l.id,
@@ -147,9 +158,8 @@ describe("V1 acceptance scenario (section 63)", () => {
     expect(result.totals.globalDiscount).toBe("1940.10");
     expect(result.totals.taxTotal).toBe("3492.18");
     expect(result.totals.grandTotal).toBe("20953.08");
-    // Original HubSpot line item is unchanged.
-    expect(hubspot.objects.line_items!.get("701")!.properties.price).toBe("1500");
-    expect(hubspot.writes.filter((w) => w.method === "PATCH").length).toBe(writesBefore);
+    // Original HubSpot line items are unchanged (DealDocs never writes line items anywhere).
+    expect(JSON.stringify(zapier.deals["9001"]!.snapshot)).toBe(snapshotBefore);
   });
 
   it("editable sections can change, locked legal text cannot; stale saves are rejected", async () => {
@@ -252,11 +262,15 @@ describe("V1 acceptance scenario (section 63)", () => {
     expect(version.status).toBe("ACCEPTED");
     expect(version.signedPdfFileId).not.toBeNull();
 
-    const deal = hubspot.objects.deals!.get("9001")!;
-    expect(deal.properties.dealstage).toBe("quote_accepted");
-    expect(deal.properties.dealdocs_latest_quote_status).toBe("Accepted");
-    expect(deal.properties.dealdocs_latest_quote_id).toBe(accepted.number);
-    expect(deal.properties.dealdocs_latest_quote_amount).toBe("20953.08");
+    const deal = zapier.deals["9001"]!;
+    expect(deal.properties.latest_quote_status).toBe("accepted");
+    expect(deal.properties.latest_quote_id).toBe(accepted.number);
+    expect(deal.properties.latest_quote_amount).toBe("20953.08");
+    // The same HubSpot record was updated (never duplicated).
+    const record = zapier.recordFor(quoteId)![1];
+    expect(record.properties.document_status).toBe("accepted");
+    expect(record.properties.file_url).toMatch(/\/files\/[A-Za-z0-9]{32}\/v1\.pdf$/);
+    expect(zapier.createCalls).toBe(1);
     // Grants are single use.
     await expect(acceptQuote(doc.publicToken, { grant }, CLIENT_META)).rejects.toThrow();
   });
@@ -322,8 +336,13 @@ describe("V1 acceptance scenario (section 63)", () => {
     const types = events.map((e) => e.type);
     for (const t of ["OTP_REQUESTED", "OTP_VERIFIED", "CONSENT_GIVEN", "SIGNED", "SIGNATURE_COMPLETED", "PDF_GENERATED"]) expect(types).toContain(t);
     expect(outbox.outbox.some((m) => m.to.includes("amina@client.test") && /completed/i.test(m.subject) && m.attachments?.length)).toBe(true);
-    expect(hubspot.objects.deals!.get("9001")!.properties.dealstage).toBe("closedwon");
-    expect(hubspot.objects.deals!.get("9001")!.properties.dealdocs_latest_contract_status).toBe("Signed");
+    const record = zapier.recordFor(contractId)![1];
+    expect(record.properties).toMatchObject({ document_status: "signed", document_type: "contract", hubspot_deal_id: "9001" });
+    expect(record.properties.signed_at).toBeTruthy();
+    expect(zapier.deals["9001"]!.properties.latest_contract_status).toBe("signed");
+    expect(zapier.deals["9001"]!.properties.document_signed).toBe("true");
+    // Pipeline change happens outside DealDocs (HubSpot workflow reacting to the property).
+    expect(zapier.deals["9001"]!.properties.dealstage).toBe("closedwon");
   });
 
   it("signed version is immutable, even at the database level", async () => {
@@ -366,18 +385,18 @@ describe("V1 acceptance scenario (section 63)", () => {
 
   it("all actions appear in document history and audit logs", async () => {
     const quoteEvents = (await prisma.documentEvent.findMany({ where: { documentId: quoteId } })).map((e) => e.type);
-    for (const t of ["CREATED", "EDITED", "PUBLISHED", "EMAIL_SENT", "VIEWED", "OTP_REQUESTED", "OTP_VERIFIED", "ACCEPTED", "CONVERTED", "HUBSPOT_SYNCED"]) expect(quoteEvents).toContain(t);
+    for (const t of ["CREATED", "EDITED", "PUBLISHED", "EMAIL_SENT", "VIEWED", "OTP_REQUESTED", "OTP_VERIFIED", "ACCEPTED", "CONVERTED", "HUBSPOT_RECORD_LINKED", "HUBSPOT_DATA_RECEIVED"]) expect(quoteEvents).toContain(t);
     const contractEvents = (await prisma.documentEvent.findMany({ where: { documentId: contractId } })).map((e) => e.type);
     expect(contractEvents).toContain("REVISION_CREATED");
     const actions = (await prisma.auditLog.findMany({ where: { organizationId } })).map((a) => a.action);
-    for (const a of ["ORGANIZATION_CREATED", "ORGANIZATION_APPROVED", "HUBSPOT_CONNECTED", "PIPELINE_MAPPING_UPDATED", "DOCUMENT_CREATED", "DOCUMENT_PUBLISHED", "DOCUMENT_SENT", "DOCUMENT_ACCEPTED", "DOCUMENT_CONVERTED", "DOCUMENT_SIGNED", "DOCUMENT_REVISED"]) {
+    for (const a of ["ORGANIZATION_CREATED", "ORGANIZATION_APPROVED", "INTEGRATION_UPDATED", "INTEGRATION_SECRET_ROTATED", "HUBSPOT_RECORD_LINKED", "DOCUMENT_CREATED", "DOCUMENT_PUBLISHED", "DOCUMENT_SENT", "DOCUMENT_ACCEPTED", "DOCUMENT_CONVERTED", "DOCUMENT_SIGNED", "DOCUMENT_REVISED"]) {
       expect(actions).toContain(a);
     }
     const history = await prisma.documentStatusChange.findMany({ where: { documentId: contractId }, orderBy: { createdAt: "asc" } });
     expect(history.map((h) => h.toStatus)).toEqual(["PUBLISHED", "AWAITING_SIGNATURE", "SIGNED", "PUBLISHED"]);
     // No secrets in audit logs.
     const serialized = JSON.stringify(await prisma.auditLog.findMany());
-    expect(serialized).not.toContain(hubspot.accessToken);
+    expect(serialized).not.toContain(zapier.secret);
     expect(serialized).not.toContain("Str0ng-Passw0rd!");
     expect(serialized).not.toMatch(/scrypt\$/);
   });

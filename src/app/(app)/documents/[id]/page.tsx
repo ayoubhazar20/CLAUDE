@@ -16,6 +16,12 @@ import { DOCUMENT_TYPE_LABELS, STATUS_LABELS } from "@/domain/status";
 import { PERMISSIONS } from "@/domain/permissions";
 import { DocumentActions } from "./actions-bar";
 import { AttachmentsPanel } from "./attachments";
+import { SnapshotReview } from "./snapshot-review";
+import { InlineAction } from "@/components/forms";
+import { objectTypeIdFor } from "@/server/integrations/config";
+import { diffSnapshot, type NormalizedSnapshot } from "@/server/integrations/snapshot";
+import { parseDocumentData } from "@/domain/document-data";
+import { refreshHubSpotDataAction, retrySyncAction } from "@/app/actions/integrations";
 
 export const metadata = { title: "Document" };
 
@@ -47,15 +53,20 @@ const EVENT_LABELS: Record<string, string> = {
   PDF_GENERATED: "PDF generated",
   ATTACHMENT_ADDED: "Attachment added",
   ATTACHMENT_REMOVED: "Attachment removed",
-  HUBSPOT_SYNCED: "HubSpot updated",
-  HUBSPOT_SYNC_SKIPPED: "HubSpot sync skipped",
-  HUBSPOT_DEAL_DELETED: "HubSpot deal deleted",
+  HUBSPOT_RECORD_LINKED: "HubSpot record linked",
+  HUBSPOT_DATA_REQUESTED: "HubSpot data requested",
+  HUBSPOT_DATA_RECEIVED: "HubSpot data received",
+  HUBSPOT_DATA_APPLIED: "HubSpot data applied",
+  HUBSPOT_DATA_DISMISSED: "HubSpot data dismissed",
+  HUBSPOT_UPDATE_RECEIVED: "HubSpot change received",
 };
 
 function metaSummary(type: string, meta: Record<string, unknown>): string {
   if (type === "EMAIL_SENT" || type === "REMINDER_SENT") return `To ${(meta.to as string[] | undefined)?.join(", ") ?? ""}`;
   if (type === "REJECTED" && meta.reason) return `Reason: ${String(meta.reason)}`;
-  if (type === "HUBSPOT_SYNCED") return `Properties: ${((meta.properties as string[]) ?? []).join(", ")}${meta.stageChange ? " · stage changed" : ""}`;
+  if (type === "HUBSPOT_RECORD_LINKED") return `Record #${String(meta.recordId ?? "")}`;
+  if (type === "HUBSPOT_DATA_RECEIVED") return meta.applied ? "Imported automatically" : "Waiting for review";
+  if (type === "HUBSPOT_UPDATE_RECEIVED") return `${String(meta.property ?? "")}`;
   if (type === "SIGNED" || type === "ACCEPTED") return [meta.signer, meta.email, meta.method].filter(Boolean).join(" · ");
   if (type === "OTP_FAILED") return `${meta.remainingAttempts ?? 0} attempts left`;
   if (type === "CONVERTED") return `Contract ${String(meta.contract ?? "")}`;
@@ -309,26 +320,50 @@ export default async function DocumentPage({ params, searchParams }: { params: P
     const attachments = await prisma.attachment.findMany({ where: { documentId: doc.id, archivedAt: null }, include: { file: { select: { size: true, contentType: true } } }, orderBy: { createdAt: "desc" } });
     content = <AttachmentsPanel documentId={doc.id} canEdit={canEdit} attachments={attachments.map((a) => ({ id: a.id, name: a.name, visibility: a.visibility, fileId: a.fileId, size: a.file.size, createdAt: dateTimeLabel(a.createdAt, tz) }))} />;
   } else if (tab === "hubspot") {
-    const [connection, others, syncs] = await Promise.all([
-      doc.hubspotConnectionId ? prisma.hubSpotConnection.findFirst({ where: { id: doc.hubspotConnectionId, organizationId: ctx.organizationId } }) : Promise.resolve(null),
-      doc.hubspotDealId ? prisma.document.findMany({ where: { organizationId: ctx.organizationId, hubspotDealId: doc.hubspotDealId, id: { not: doc.id } }, orderBy: { createdAt: "desc" }, select: { id: true, number: true, type: true, status: true, isPrimary: true, archivedAt: true } }) : Promise.resolve([]),
-      prisma.documentEvent.findMany({ where: { documentId: doc.id, type: { in: ["HUBSPOT_SYNCED", "HUBSPOT_SYNC_SKIPPED", "HUBSPOT_DEAL_DELETED"] } }, orderBy: { createdAt: "desc" }, take: 20 }),
+    const [integration, others, syncEvents, pending, lastApplied] = await Promise.all([
+      prisma.zapierIntegration.findUnique({ where: { organizationId: ctx.organizationId } }),
+      doc.hubspotDealId ? prisma.document.findMany({ where: { organizationId: ctx.organizationId, hubspotDealId: doc.hubspotDealId, id: { not: doc.id } }, orderBy: { createdAt: "desc" }, select: { id: true, number: true, type: true, status: true, isPrimary: true } }) : Promise.resolve([]),
+      prisma.syncEvent.findMany({ where: { documentId: doc.id, organizationId: ctx.organizationId }, orderBy: { createdAt: "desc" }, take: 30 }),
+      prisma.dealSnapshot.findFirst({ where: { documentId: doc.id, organizationId: ctx.organizationId, status: "PENDING_REVIEW" }, orderBy: { receivedAt: "desc" } }),
+      prisma.dealSnapshot.findFirst({ where: { documentId: doc.id, organizationId: ctx.organizationId, status: "APPLIED" }, orderBy: { receivedAt: "desc" } }),
     ]);
-    content = doc.hubspotDealId ? (
+    const canManageSync = ctx.permissions.has(PERMISSIONS.INTEGRATIONS_MANAGE) && !ctx.isSupportView;
+    let review: React.ReactNode = null;
+    if (pending) {
+      const draft = doc.draftVersionId ? await prisma.documentVersion.findUnique({ where: { id: doc.draftVersionId } }) : null;
+      const snap = pending.payload as unknown as NormalizedSnapshot;
+      const diff = draft ? diffSnapshot(parseDocumentData(draft.data), snap, (integration?.propertyVariableMap ?? {}) as Record<string, string>) : [];
+      const currentLines = draft ? await prisma.documentLineItem.findMany({ where: { versionId: draft.id }, orderBy: { position: "asc" }, select: { name: true, quantity: true, unitPrice: true } }) : [];
+      review = (
+        <SnapshotReview
+          documentId={doc.id}
+          snapshotId={pending.id}
+          receivedAt={dateTimeLabel(pending.receivedAt, tz)}
+          canApply={canEdit && Boolean(draft)}
+          needsRevision={!draft}
+          diff={diff}
+          hasContact={Boolean(snap.contact?.email)}
+          incomingLines={(snap.lineItems ?? []).map((l) => ({ name: l.name, quantity: l.quantity, unitPrice: l.unitPrice }))}
+          currentLines={currentLines.map((l) => ({ name: l.name, quantity: l.quantity.toString(), unitPrice: l.unitPrice.toString() }))}
+          currency={doc.currency}
+        />
+      );
+    }
+    content = (
       <div className="grid gap-5 lg:grid-cols-2">
-        <Card title="Deal">
+        <Card title="HubSpot link" actions={doc.hubspotDealId && canEdit ? <InlineAction action={refreshHubSpotDataAction} hidden={{ documentId: doc.id }}>Refresh HubSpot data</InlineAction> : null}>
           <DescriptionList
             items={[
-              { label: "Deal", value: doc.hubspotDealName ?? doc.hubspotDealId },
-              { label: "Deal ID", value: doc.hubspotDealId },
-              { label: "Portal", value: doc.hubspotPortalId ?? "—" },
+              { label: "HubSpot deal", value: doc.hubspotDealId ? <Link className="text-brand-700 underline" href={`/deals/${doc.hubspotDealId}/documents`}>{doc.hubspotDealName ?? "Deal"} #{doc.hubspotDealId}</Link> : "Not linked" },
+              { label: "HubSpot record", value: doc.hubspotObjectRecordId ? `#${doc.hubspotObjectRecordId}` : doc.hubspotDealId ? <span className="text-slate-500">Waiting for Zapier</span> : "—" },
+              { label: "Custom object type", value: objectTypeIdFor(integration) ?? "Not configured" },
+              { label: "Linked", value: dateTimeLabel(doc.hubspotLinkedAt, tz) },
+              { label: "Last sync", value: dateTimeLabel(doc.lastSyncAt, tz) },
+              { label: "HubSpot data", value: { NOT_REQUESTED: "Not requested", REQUESTED: "Requested — waiting for Zapier", APPLIED: lastApplied ? `Imported ${dateTimeLabel(lastApplied.resolvedAt ?? lastApplied.receivedAt, tz)}` : "Imported", PENDING_REVIEW: "New data waiting for review" }[doc.dealDataStatus] ?? doc.dealDataStatus },
               { label: "Primary document", value: doc.isPrimary ? "Yes" : "No" },
-              { label: "Connection", value: connection ? connection.status.toLowerCase() : "—" },
             ]}
           />
-          {connection?.hubDomain ? (
-            <a className="mt-3 inline-block text-sm text-brand-700 underline" target="_blank" rel="noreferrer" href={`https://app.hubspot.com/contacts/${doc.hubspotPortalId}/record/0-3/${doc.hubspotDealId}`}>Open deal in HubSpot</a>
-          ) : null}
+          <p className="mt-3 text-xs text-slate-500">DealDocs is authoritative for the document content, prices, versions and signatures. The HubSpot record is a mirror maintained by Zapier.</p>
         </Card>
         <Card title="Other documents on this deal">
           {others.length ? (
@@ -340,18 +375,28 @@ export default async function DocumentPage({ params, searchParams }: { params: P
                 </li>
               ))}
             </ul>
-          ) : <p className="text-sm text-slate-500">This is the only document for the deal.</p>}
+          ) : <p className="text-sm text-slate-500">{doc.hubspotDealId ? "This is the only document for the deal." : "—"}</p>}
         </Card>
-        <Card title="Synchronization log" className="lg:col-span-2">
-          {syncs.length ? (
-            <ul className="space-y-1 text-sm">
-              {syncs.map((s) => <li key={s.id}>{dateTimeLabel(s.createdAt, tz)} — {EVENT_LABELS[s.type]} {metaSummary(s.type, s.metadata as Record<string, unknown>)}</li>)}
-            </ul>
+        {review ? <div className="lg:col-span-2">{review}</div> : null}
+        <Card title="Synchronization with HubSpot" className="lg:col-span-2" actions={canManageSync ? <Link href="/settings/integrations/zapier/log" className="text-sm text-brand-700 underline">Full log</Link> : null}>
+          {syncEvents.length ? (
+            <Table>
+              <thead className="bg-slate-50"><tr><Th>When</Th><Th>Event</Th><Th>Status</Th><Th>Details</Th><Th /></tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                {syncEvents.map((e) => (
+                  <tr key={e.id}>
+                    <Td className="whitespace-nowrap text-xs">{dateTimeLabel(e.createdAt, tz)}</Td>
+                    <Td className="font-mono text-xs">{e.eventType}</Td>
+                    <Td><Badge tone={e.status === "SUCCESS" ? "green" : e.status === "FAILED" ? "red" : "gray"}>{e.status.toLowerCase()}</Badge></Td>
+                    <Td className="max-w-sm text-xs text-slate-600">{e.lastError ?? (e.deliveredAt ? `Delivered ${dateTimeLabel(e.deliveredAt, tz)}` : `Attempts: ${e.attempts}`)}</Td>
+                    <Td className="text-right">{e.status === "FAILED" && canManageSync ? <InlineAction action={retrySyncAction} hidden={{ syncEventId: e.id }}>Retry</InlineAction> : null}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
           ) : <p className="text-sm text-slate-500">No synchronization yet.</p>}
         </Card>
       </div>
-    ) : (
-      <EmptyState title="Not linked to a HubSpot deal" description="Documents created from a HubSpot deal synchronize their status back to the deal." />
     );
   }
 

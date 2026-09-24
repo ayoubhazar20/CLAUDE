@@ -1,57 +1,52 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { requireOrgPage } from "@/server/auth/context";
 import { prisma } from "@/server/db";
-import { primaryConnection } from "@/server/hubspot/client";
-import { searchDeals } from "@/server/hubspot/import";
-import { AppError } from "@/server/errors";
-import { Alert, Button, ButtonLink, EmptyState, Input, PageHeader, Table, Td, Th } from "@/components/ui";
-import { PERMISSIONS } from "@/domain/permissions";
+import { documentViewFilter } from "@/server/documents/access";
+import { Button, EmptyState, Input, PageHeader, Table, Td, Th } from "@/components/ui";
+import { dateLabel } from "@/lib/format";
 
 export const metadata = { title: "Deals" };
 
+/** HubSpot deals known to DealDocs (from its own documents — HubSpot is never queried). */
 export default async function DealsPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
-  const ctx = await requireOrgPage(PERMISSIONS.DOCUMENTS_CREATE);
-  const q = (await searchParams).q ?? "";
-  const connection = await primaryConnection(ctx.organizationId);
-  if (!connection || connection.status !== "CONNECTED") {
-    return (
-      <>
-        <PageHeader title="Deals" />
-        <Alert tone="warning" title="HubSpot is not connected">Deals are read live from HubSpot. {ctx.permissions.has(PERMISSIONS.HUBSPOT_MANAGE) ? <Link href="/settings/integrations/hubspot" className="font-semibold underline">Connect HubSpot</Link> : "Ask a Company Admin to connect HubSpot."}</Alert>
-      </>
-    );
-  }
-  let deals: Awaited<ReturnType<typeof searchDeals>> = [];
-  let error: string | null = null;
-  try {
-    deals = await searchDeals(ctx, q);
-  } catch (e) {
-    if (!(e instanceof AppError)) throw e;
-    error = e.message;
-  }
-  const counts = await prisma.document.groupBy({ by: ["hubspotDealId"], where: { organizationId: ctx.organizationId, hubspotDealId: { in: deals.map((d) => d.id) }, archivedAt: null }, _count: true });
-  const countOf = (id: string) => counts.find((c) => c.hubspotDealId === id)?._count ?? 0;
+  const ctx = await requireOrgPage();
+  const q = ((await searchParams).q ?? "").trim();
+  if (/^\d{1,30}$/.test(q)) redirect(`/deals/${q}/documents`);
+  const filter = await documentViewFilter(ctx);
+  const rows = await prisma.document.groupBy({
+    by: ["hubspotDealId"],
+    where: { AND: [filter, { hubspotDealId: { not: null }, archivedAt: null }, q ? { hubspotDealName: { contains: q, mode: "insensitive" } } : {}] },
+    _count: true,
+    _max: { updatedAt: true },
+    orderBy: { _max: { updatedAt: "desc" } },
+    take: 100,
+  });
+  const names = await prisma.document.findMany({
+    where: { organizationId: ctx.organizationId, hubspotDealId: { in: rows.map((r) => r.hubspotDealId!) }, hubspotDealName: { not: null } },
+    select: { hubspotDealId: true, hubspotDealName: true, clientCompany: true },
+    orderBy: { updatedAt: "desc" },
+  });
+  const info = (id: string) => names.find((n) => n.hubspotDealId === id);
   return (
     <>
-      <PageHeader title="Deals" description="Your HubSpot deals — create a quote or contract in one click." />
+      <PageHeader title="Deals" description="HubSpot deals that have DealDocs documents. Open a deal from the HubSpot card, or enter its HubSpot deal ID." />
       <form method="get" className="mb-4 flex max-w-lg gap-2" role="search">
-        <Input name="q" defaultValue={q} placeholder="Search deals…" aria-label="Search deals" />
+        <Input name="q" defaultValue={q} placeholder="Deal name or HubSpot deal ID" aria-label="Search deals" />
         <Button type="submit" variant="secondary">Search</Button>
       </form>
-      {error ? <Alert tone="error" title="HubSpot API error">{error}</Alert> : deals.length === 0 ? <EmptyState title="No deals found" /> : (
+      {rows.length === 0 ? (
+        <EmptyState title="No deals yet" description="Deals appear here once a quote or contract is created from HubSpot." />
+      ) : (
         <Table>
-          <thead className="bg-slate-50"><tr><Th>Deal</Th><Th>Amount</Th><Th>Close date</Th><Th>Documents</Th><Th /></tr></thead>
+          <thead className="bg-slate-50"><tr><Th>Deal</Th><Th>Client</Th><Th>Documents</Th><Th>Last activity</Th></tr></thead>
           <tbody className="divide-y divide-slate-100">
-            {deals.map((d) => (
-              <tr key={d.id}>
-                <Td className="font-medium">{d.name}</Td>
-                <Td className="tabular-nums">{d.amount ? `${d.amount} ${d.currency}` : "—"}</Td>
-                <Td>{d.closeDate ? d.closeDate.slice(0, 10) : "—"}</Td>
-                <Td>{countOf(d.id) ? <Link className="text-brand-700 underline" href={`/documents?dealId=${d.id}`}>{countOf(d.id)} document{countOf(d.id) > 1 ? "s" : ""}</Link> : "—"}</Td>
-                <Td className="space-x-2 whitespace-nowrap text-right">
-                  <ButtonLink size="sm" href={`/documents/new?type=QUOTE&dealId=${d.id}`}>Quote</ButtonLink>
-                  <ButtonLink size="sm" variant="secondary" href={`/documents/new?type=CONTRACT&dealId=${d.id}`}>Contract</ButtonLink>
-                </Td>
+            {rows.map((r) => (
+              <tr key={r.hubspotDealId}>
+                <Td><Link className="font-medium text-brand-700 hover:underline" href={`/deals/${r.hubspotDealId}/documents`}>{info(r.hubspotDealId!)?.hubspotDealName ?? `Deal ${r.hubspotDealId}`}</Link><div className="text-xs text-slate-500">HubSpot #{r.hubspotDealId}</div></Td>
+                <Td>{info(r.hubspotDealId!)?.clientCompany ?? "—"}</Td>
+                <Td>{r._count}</Td>
+                <Td className="text-slate-500">{dateLabel(r._max.updatedAt, ctx.organization.timezone)}</Td>
               </tr>
             ))}
           </tbody>

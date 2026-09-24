@@ -14,7 +14,6 @@ import { CURRENCY_CODES } from "@/domain/currencies";
 import type { VariableDefinition } from "@/domain/variables";
 import { Alert, Badge, Button, Input, Label, Select, Textarea, cn } from "../ui";
 import { DocumentFrame } from "../document-frame";
-import { Modal } from "../modal";
 import { BLOCK_LABELS, BlockPropsEditor } from "./block-fields";
 
 export interface EditorLine {
@@ -64,7 +63,8 @@ export interface DocumentEditorProps {
   timezone: string;
   variables: VariableDefinition[];
   customFields: CustomFieldDef[];
-  hubspotConnected: boolean;
+  /** HubSpot deal data (via Zapier): NOT_REQUESTED | REQUESTED | APPLIED | PENDING_REVIEW */
+  dealData: { dealId: string | null; status: string };
   canPublish: boolean;
 }
 
@@ -103,7 +103,7 @@ export function DocumentEditor(props: DocumentEditorProps) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
-  const [productSearch, setProductSearch] = useState(false);
+  const [dealDataStatus, setDealDataStatus] = useState(props.dealData.status);
   const baseUpdatedAt = useRef(props.initial.updatedAt);
   const version = useRef(0);
   const savedVersion = useRef(0);
@@ -206,6 +206,20 @@ export function DocumentEditor(props: DocumentEditorProps) {
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, []);
+
+  // HubSpot data is delivered asynchronously by Zapier: poll while it is being requested.
+  useEffect(() => {
+    if (dealDataStatus !== "REQUESTED") return;
+    const timer = setInterval(async () => {
+      const res = await fetch(`/api/documents/${props.documentId}/deal-data`).catch(() => null);
+      const json = res?.ok ? await res.json().catch(() => null) : null;
+      if (!json || json.status === "REQUESTED") return;
+      setDealDataStatus(json.status);
+      // Imported into an untouched draft: reload to show it (nothing local to lose).
+      if (json.status === "APPLIED" && savedVersion.current === version.current) window.location.reload();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [dealDataStatus, props.documentId]);
 
   // ── Preview ──
   const previewHtml = useMemo(() => {
@@ -323,6 +337,11 @@ export function DocumentEditor(props: DocumentEditorProps) {
           </Button>
         </div>
       </div>
+      {props.dealData.dealId && dealDataStatus === "REQUESTED" ? (
+        <div className="mb-4"><Alert tone="info" title="Importing HubSpot data…">Waiting for Zapier to send the deal’s contact, company and line items (HubSpot deal #{props.dealData.dealId}). This page updates automatically — edits you make now are kept, and the HubSpot data will then wait for your review.</Alert></div>
+      ) : dealDataStatus === "PENDING_REVIEW" ? (
+        <div className="mb-4"><Alert tone="warning" title="New HubSpot data available">HubSpot data arrived for this document. Your edits were kept. <Link className="font-semibold underline" href={`/documents/${props.documentId}?tab=hubspot`}>Review and choose what to update</Link></Alert></div>
+      ) : null}
       {saveState === "conflict" ? (
         <div className="mb-4"><Alert tone="error" title="Could not save">{saveError} <button className="font-semibold underline" onClick={() => router.refresh()}>Reload</button></Alert></div>
       ) : saveState === "error" && saveError ? (
@@ -458,7 +477,6 @@ export function DocumentEditor(props: DocumentEditorProps) {
               })}
               <div className="flex flex-wrap gap-2">
                 <Button type="button" size="sm" variant="secondary" onClick={addCustomLine}>+ Custom item</Button>
-                {props.hubspotConnected ? <Button type="button" size="sm" variant="secondary" onClick={() => setProductSearch(true)}>+ HubSpot product</Button> : null}
               </div>
             </div>
 
@@ -608,14 +626,6 @@ export function DocumentEditor(props: DocumentEditorProps) {
         </div>
       </div>
 
-      <Modal open={productSearch} onClose={() => setProductSearch(false)} title="Add a HubSpot product">
-        <ProductSearch
-          onPick={(p) => {
-            setLinesE((prev) => [...prev, { id: uuid(), source: "HUBSPOT_PRODUCT", hubspotLineItemId: null, hubspotProductId: p.id, sku: p.sku || null, name: p.name, description: p.description || null, category: null, quantity: "1", unitPrice: p.price || "0", discountType: "NONE", discountValue: "0", taxKeys: defaultTaxKeys, optional: false }]);
-            setProductSearch(false);
-          }}
-        />
-      </Modal>
     </div>
   );
 }
@@ -668,47 +678,5 @@ export function LockIcon() {
       <rect x="4" y="11" width="16" height="10" rx="2" />
       <path d="M8 11V7a4 4 0 0 1 8 0v4" />
     </svg>
-  );
-}
-
-function ProductSearch({ onPick }: { onPick: (p: { id: string; name: string; description: string; price: string; sku: string }) => void }) {
-  const [q, setQ] = useState("");
-  const [results, setResults] = useState<{ id: string; name: string; description: string; price: string; sku: string }[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  return (
-    <div className="space-y-3">
-      <form
-        className="flex gap-2"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setLoading(true);
-          setError(null);
-          const res = await fetch(`/api/hubspot/products?q=${encodeURIComponent(q)}`);
-          const json = await res.json().catch(() => null);
-          setLoading(false);
-          if (!res.ok) setError(json?.error?.message ?? "Search failed");
-          else setResults(json.products);
-        }}
-      >
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search the HubSpot product library…" aria-label="Search products" autoFocus />
-        <Button type="submit" variant="secondary" disabled={loading}>{loading ? "…" : "Search"}</Button>
-      </form>
-      {error ? <Alert tone="error">{error}</Alert> : null}
-      {results ? (
-        results.length ? (
-          <ul className="divide-y divide-slate-100 rounded border border-slate-200">
-            {results.map((p) => (
-              <li key={p.id}>
-                <button type="button" onClick={() => onPick(p)} className="flex w-full justify-between px-3 py-2 text-left text-sm hover:bg-slate-50">
-                  <span><span className="font-medium">{p.name}</span>{p.sku ? <span className="ml-2 text-xs text-slate-500">{p.sku}</span> : null}</span>
-                  <span className="tabular-nums">{p.price}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : <p className="text-sm text-slate-600">No products found.</p>
-      ) : null}
-    </div>
   );
 }

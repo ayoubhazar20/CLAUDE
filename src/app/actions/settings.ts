@@ -6,15 +6,6 @@ import { requireOrgApi } from "@/server/auth/context";
 import { archiveTeam, changeMemberRole, createTeam, inviteUser, revokeInvitation, setMembershipStatus, setTeamMember } from "@/server/services/members";
 import { saveEmailTemplate } from "@/server/services/email-templates";
 import { archiveCustomField, upsertCustomField } from "@/server/services/custom-fields";
-import { disconnectHubSpot } from "@/server/hubspot/oauth";
-import {
-  deletePipelineMapping,
-  deletePropertyMapping,
-  installWritebackProperties,
-  updateConnectionSettings,
-  upsertPipelineMapping,
-  upsertPropertyMapping,
-} from "@/server/hubspot/settings";
 import { markNotificationsRead } from "@/server/services/notifications";
 import type { ActionState } from "@/lib/action-state";
 
@@ -85,45 +76,6 @@ export async function customFieldAction(_prev: ActionState, form: FormData): Pro
       formString(form, "id") || undefined,
     );
     return { ok: true, message: "Variable saved." };
-  });
-}
-
-export async function hubspotAction(_prev: ActionState, form: FormData): Promise<ActionState> {
-  return runAction("hubspot", async () => {
-    const ctx = await requireOrgApi();
-    switch (formString(form, "op")) {
-      case "disconnect":
-        await disconnectHubSpot(ctx, formString(form, "connectionId"));
-        return { ok: true, message: "HubSpot disconnected." };
-      case "settings":
-        await updateConnectionSettings(ctx, { writebackEnabled: formBool(form, "writebackEnabled"), pipelineAutomationEnabled: formBool(form, "pipelineAutomationEnabled"), defaultDocumentType: (formString(form, "defaultDocumentType") || "QUOTE") as "QUOTE" });
-        return { ok: true, message: "Synchronization settings saved." };
-      case "mapping":
-        await upsertPropertyMapping(ctx, {
-          objectType: formString(form, "objectType") as "DEAL",
-          hubspotProperty: formString(form, "hubspotProperty"),
-          variableKey: formString(form, "variableKey"),
-          direction: formString(form, "direction") as "IMPORT",
-          label: formString(form, "label") || null,
-        });
-        return { ok: true, message: "Mapping saved." };
-      case "deleteMapping":
-        await deletePropertyMapping(ctx, formString(form, "id"));
-        return { ok: true, message: "Mapping removed." };
-      case "installWriteback":
-        await installWritebackProperties(ctx);
-        return { ok: true, message: "DealDocs properties created in HubSpot and mapped." };
-      case "pipeline": {
-        const [pipelineId, stageId] = formString(form, "stage").split("::");
-        await upsertPipelineMapping(ctx, { event: formString(form, "event") as "QUOTE_PUBLISHED", pipelineId: pipelineId ?? "", stageId: stageId ?? "" });
-        return { ok: true, message: "Pipeline automation saved." };
-      }
-      case "deletePipeline":
-        await deletePipelineMapping(ctx, formString(form, "id"));
-        return { ok: true, message: "Automation removed." };
-      default:
-        return { ok: false, error: "Unknown operation" };
-    }
   });
 }
 

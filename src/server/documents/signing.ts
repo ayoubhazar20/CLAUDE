@@ -9,8 +9,7 @@ import { enqueue } from "../jobs/queue";
 import { queueEmail } from "../email/service";
 import { renderEmailLayout, textToEmailHtml } from "../email/layout";
 import { notifyUser } from "../services/notifications";
-import { scheduleHubSpotSync } from "../hubspot/sync";
-import { automationEvent } from "./automation";
+import { emitDocumentEvent } from "../integrations/outbound";
 import { changeStatus, recordEvent, type Actor } from "./events";
 import { consumeGrant, invalidateOpenChallenges, issueOtp, verifyOtp } from "./otp";
 import { expireIfDue, findPublishedDocument } from "./public";
@@ -139,7 +138,7 @@ export async function acceptQuote(token: string, input: { grant: string }, meta:
     await enqueue("pdf.generateSigned", { versionId: version.id, sendConfirmation: true }, { organizationId: doc.organizationId, dedupeKey: `signed-pdf:${version.id}` }, tx);
     return { signatureId: signature.id };
   });
-  await scheduleHubSpotSync(doc.id, doc.organizationId, automationEvent(doc.type, "ACCEPTED"));
+  await emitDocumentEvent(doc, "DOCUMENT_ACCEPTED", { version: version.versionNumber });
   return result;
 }
 
@@ -171,7 +170,7 @@ export async function rejectDocument(token: string, input: { grant: string; reas
       tx,
     );
   });
-  await scheduleHubSpotSync(doc.id, doc.organizationId, automationEvent(doc.type, "REJECTED"));
+  await emitDocumentEvent(doc, "DOCUMENT_REJECTED", { reason, version: version.versionNumber });
 }
 
 // ───────────────────────── Signature ─────────────────────────
@@ -284,7 +283,8 @@ export async function signDocument(token: string, input: z.input<typeof signSche
     }
     return { complete, signatureId: signature.id };
   });
-  if (outcome.complete) await scheduleHubSpotSync(doc.id, doc.organizationId, automationEvent(doc.type, "SIGNED"));
+  // Partial signatures are reported as an update; completion as DOCUMENT_SIGNED (delivered once the signed PDF exists).
+  await emitDocumentEvent(doc, outcome.complete ? "DOCUMENT_SIGNED" : "DOCUMENT_UPDATED", outcome.complete ? { version: version.versionNumber } : { change: "partially_signed", version: version.versionNumber });
   return outcome;
 }
 

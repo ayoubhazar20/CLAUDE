@@ -4,7 +4,6 @@ import { prisma } from "@/server/db";
 import { loadDocumentForEdit } from "@/server/documents/access";
 import { organizationForRender, parsePricingConfig } from "@/server/documents/render-input";
 import { variableCatalog } from "@/server/services/custom-fields";
-import { primaryConnection } from "@/server/hubspot/client";
 import { AppError, NotFoundError } from "@/server/errors";
 import { Alert, ButtonLink, PageHeader } from "@/components/ui";
 import { DocumentEditor } from "@/components/editor/document-editor";
@@ -37,12 +36,11 @@ export default async function EditDocumentPage({ params }: { params: Promise<{ i
     );
   }
   if (doc.archivedAt) redirect(`/documents/${doc.id}`);
-  const [version, organization, customFields, variables, connection] = await Promise.all([
+  const [version, organization, customFields, variables] = await Promise.all([
     prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.draftVersionId }, include: { lineItems: { orderBy: { position: "asc" } } } }),
     prisma.organization.findUniqueOrThrow({ where: { id: ctx.organizationId } }),
     prisma.customFieldDefinition.findMany({ where: { organizationId: ctx.organizationId, archivedAt: null, appliesTo: { has: doc.type } }, orderBy: { label: "asc" } }),
     variableCatalog(ctx.organizationId),
-    primaryConnection(ctx.organizationId),
   ]);
   return (
     <DocumentEditor
@@ -82,7 +80,7 @@ export default async function EditDocumentPage({ params }: { params: Promise<{ i
       timezone={organization.timezone}
       variables={variables}
       customFields={customFields.map((f) => ({ key: f.key, label: f.label, type: f.type, options: f.options, required: f.required }))}
-      hubspotConnected={connection?.status === "CONNECTED"}
+      dealData={{ dealId: doc.hubspotDealId, status: doc.dealDataStatus }}
       canPublish={ctx.permissions.has(PERMISSIONS.DOCUMENTS_PUBLISH)}
     />
   );

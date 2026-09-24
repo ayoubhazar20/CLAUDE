@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import type { Document, DocumentType, Prisma } from "@prisma/client";
-import { automationEvent } from "./automation";
 import { z } from "zod";
 import { prisma, type Tx } from "../db";
 import { audit } from "../audit";
@@ -10,8 +9,7 @@ import { canonicalJson, publicToken as newPublicToken, sha256Hex } from "../secu
 import { enqueue } from "../jobs/queue";
 import { assertWithinLimit, recordUsage } from "../services/billing";
 import { parseTemplateSettings, sanitizeBlocks } from "../services/templates";
-import { importDeal, type DealImport } from "../hubspot/import";
-import { scheduleHubSpotSync } from "../hubspot/sync";
+import { emitDocumentEvent, requestDealData } from "../integrations/outbound";
 import { changeStatus, recordEvent, userActor } from "./events";
 import { loadDocumentForEdit, loadDocumentForView } from "./access";
 import { allocateDocumentNumber } from "./numbering";
@@ -58,8 +56,8 @@ async function uniquePublicToken(tx: Tx): Promise<string> {
 export const createDocumentSchema = z.object({
   type: z.enum(["QUOTE", "CONTRACT"]),
   templateId: z.string().uuid(),
-  hubspotDealId: z.string().regex(/^\d{1,30}$/).optional().nullable(),
-  contactId: z.string().regex(/^\d{1,30}$/).optional().nullable(),
+  /** HubSpot Deal record id (from the HubSpot card link). Stored permanently; CRM data arrives via Zapier. */
+  hubspotDealId: z.string().trim().regex(/^\d{1,30}$/, "HubSpot deal ids are numeric").optional().nullable(),
   title: z.string().trim().max(200).optional(),
   currency: z.enum(CURRENCY_CODES as [string, ...string[]]).optional(),
 });
@@ -80,35 +78,9 @@ export interface LineItemSeed {
   optional?: boolean;
 }
 
-/** Build line items + taxes from a deal import and template defaults. */
-export function seedPricingFromImport(imported: DealImport | null, settings: ReturnType<typeof parseTemplateSettings>): { lines: LineItemSeed[]; pricing: PricingConfig } {
-  const taxes = [...settings.defaultTaxes];
-  const defaultTaxKeys = settings.applyDefaultTaxes ? taxes.map((t) => t.key) : [];
-  const lines: LineItemSeed[] = (imported?.lineItems ?? []).map((li) => {
-    const taxKeys = [...defaultTaxKeys];
-    if (li.taxRate) {
-      let tax = taxes.find((t) => dec(t.rate).equals(dec(li.taxRate!)));
-      if (!tax) {
-        tax = { key: `hs_tax_${taxes.length + 1}`, name: "Tax", rate: dec(li.taxRate).toString() };
-        taxes.push(tax);
-      }
-      if (!taxKeys.includes(tax.key)) taxKeys.splice(0, taxKeys.length, tax.key);
-    }
-    return {
-      source: "HUBSPOT_LINE_ITEM",
-      hubspotLineItemId: li.hubspotLineItemId,
-      hubspotProductId: li.hubspotProductId,
-      sku: li.sku,
-      name: li.name,
-      description: li.description,
-      quantity: li.quantity,
-      unitPrice: li.unitPrice,
-      discountType: li.discountType,
-      discountValue: li.discountValue,
-      taxKeys,
-    };
-  });
-  return { lines, pricing: { globalDiscountType: "NONE", globalDiscountValue: "0", taxes, fees: [] } };
+/** Template default taxes (line items arrive later through the HubSpot snapshot). */
+export function initialPricing(settings: ReturnType<typeof parseTemplateSettings>): PricingConfig {
+  return { globalDiscountType: "NONE", globalDiscountValue: "0", taxes: [...settings.defaultTaxes], fees: [] };
 }
 
 async function customFieldDefaults(tx: Tx, organizationId: string, type: DocumentType): Promise<Record<string, string>> {
@@ -126,7 +98,7 @@ interface NewDocumentParams {
   data: DocumentData;
   lines: LineItemSeed[];
   pricing: PricingConfig;
-  hubspot: { connectionId: string | null; portalId: string | null; dealId: string | null; dealName: string | null };
+  hubspot: { dealId: string | null; dealName: string | null; objectRecordId?: null };
   sourceQuoteId?: string | null;
 }
 
@@ -153,8 +125,6 @@ async function insertDocument(ctx: OrgContext, tx: Tx, p: NewDocumentParams): Pr
       teamId: await userTeamId(ctx, tx),
       templateId: p.template.id,
       templateVersionId: p.template.versionId,
-      hubspotConnectionId: p.hubspot.connectionId,
-      hubspotPortalId: p.hubspot.portalId,
       hubspotDealId: p.hubspot.dealId,
       hubspotDealName: p.hubspot.dealName,
       currency: p.currency,
@@ -225,47 +195,32 @@ export async function createDocument(ctx: OrgContext, input: z.input<typeof crea
   const templateVersion = await prisma.templateVersion.findFirstOrThrow({ where: { id: template.publishedVersionId, organizationId: ctx.organizationId } });
   const settings = parseTemplateSettings(templateVersion.settings, data.type);
 
-  // Network calls happen before the transaction.
-  const imported = data.hubspotDealId ? await importDeal(ctx, data.hubspotDealId, { contactId: data.contactId }) : null;
-  const seeded = seedPricingFromImport(imported, settings);
-  const currency = data.currency ?? settings.currency ?? imported?.currency ?? (isCurrencyCode(ctx.organization.defaultCurrency) ? ctx.organization.defaultCurrency : "MAD");
-
-  const docData = imported ? structuredClone(imported.data) : parseDocumentData({});
-  const primary = imported?.contacts.find((c) => c.hubspotId === (docData.contact.hubspotId ?? "")) ?? null;
-  if (primary?.email) {
-    docData.recipients = [
-      {
-        id: crypto.randomUUID(),
-        name: [primary.firstName, primary.lastName].filter(Boolean).join(" ") || primary.email,
-        email: primary.email.toLowerCase(),
-        role: "SIGNER",
-        signingOrder: 1,
-        required: true,
-        hubspotContactId: primary.hubspotId,
-      },
-    ];
-  }
+  const currency = data.currency ?? settings.currency ?? (isCurrencyCode(ctx.organization.defaultCurrency) ? ctx.organization.defaultCurrency : "MAD");
+  const dealId = data.hubspotDealId || null;
 
   const document = await prisma.$transaction(async (tx) => {
-    docData.customFields = { ...(await customFieldDefaults(tx, ctx.organizationId, data.type)), ...docData.customFields };
+    const docData = parseDocumentData({});
+    docData.customFields = await customFieldDefaults(tx, ctx.organizationId, data.type);
     const doc = await insertDocument(ctx, tx, {
       type: data.type,
       template: { id: template.id, versionId: templateVersion.id, content: templateVersion.content, settings: templateVersion.settings },
-      title: data.title || defaultTitle(data.type, imported?.dealName ?? null),
+      title: data.title || defaultTitle(data.type, null),
       currency,
       data: docData,
-      lines: seeded.lines,
-      pricing: seeded.pricing,
-      hubspot: {
-        connectionId: imported?.connectionId ?? null,
-        portalId: imported?.portalId ?? null,
-        dealId: imported?.dealId ?? null,
-        dealName: imported?.dealName ?? null,
-      },
+      lines: [],
+      pricing: initialPricing(settings),
+      hubspot: { dealId, dealName: null },
     });
-    await recordEvent(tx, doc, "CREATED", userActor(ctx), 1, { templateId: template.id, templateVersion: templateVersion.version, hubspotDealId: doc.hubspotDealId, importedLineItems: seeded.lines.length });
-    await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_CREATED", entityType: "Document", entityId: doc.id, ip: ctx.meta.ip, userAgent: ctx.meta.userAgent, newValue: { number: doc.number, type: doc.type, hubspotDealId: doc.hubspotDealId } }, tx);
+    await recordEvent(tx, doc, "CREATED", userActor(ctx), 1, { templateId: template.id, templateVersion: templateVersion.version, hubspotDealId: dealId });
+    await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_CREATED", entityType: "Document", entityId: doc.id, ip: ctx.meta.ip, userAgent: ctx.meta.userAgent, newValue: { number: doc.number, type: doc.type, hubspotDealId: dealId } }, tx);
     await recordUsage(ctx.organizationId, "DOCUMENT_CREATED", 1, { documentId: doc.id }, tx);
+    // HubSpot mirror: Zapier creates (find-or-create) the custom object record and associates it to the deal,
+    // and — separately — sends back a snapshot of the deal, contact, company and line items.
+    await emitDocumentEvent(doc, "DOCUMENT_CREATED", {}, tx);
+    if (dealId) {
+      await requestDealData(ctx, doc.id, "initial", tx);
+      await recordEvent(tx, doc, "HUBSPOT_DATA_REQUESTED", userActor(ctx), 1, { dealId });
+    }
     return doc;
   });
   return document;
@@ -579,9 +534,9 @@ export async function publishDocument(ctx: OrgContext, documentId: string) {
     }, tx);
     await recordUsage(ctx.organizationId, "DOCUMENT_PUBLISHED", 1, { documentId: doc.id }, tx);
     await enqueue("pdf.generate", { versionId: draft.id }, { organizationId: ctx.organizationId, dedupeKey: `pdf:${draft.id}` }, tx);
+    await emitDocumentEvent(doc, "DOCUMENT_PUBLISHED", { version: draft.versionNumber, revision: isRevision }, tx);
     return { versionId: draft.id, versionNumber: draft.versionNumber };
   });
-  await scheduleHubSpotSync(doc.id, ctx.organizationId, automationEvent(doc.type, "PUBLISHED"));
   return result;
 }
 
@@ -657,6 +612,7 @@ export async function createRevision(ctx: OrgContext, documentId: string, option
     });
     await recordEvent(tx, doc, "REVISION_CREATED", userActor(ctx), versionNumber, { fromVersion: source.versionNumber, fromLatestTemplate: Boolean(options.fromLatestTemplate) });
     await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_REVISED", entityType: "Document", entityId: doc.id, ip: ctx.meta.ip, userAgent: ctx.meta.userAgent, metadata: { fromVersion: source.versionNumber, newVersion: versionNumber } }, tx);
+    await emitDocumentEvent(doc, "DOCUMENT_REVISED", { fromVersion: source.versionNumber, newVersion: versionNumber }, tx);
     return { versionId: version.id, created: true };
   });
 }
@@ -729,12 +685,13 @@ export async function duplicateDocument(ctx: OrgContext, documentId: string) {
       data,
       lines: linesToSeeds(lines),
       pricing: parsePricingConfig(version.pricingConfig),
-      hubspot: { connectionId: source.hubspotConnectionId, portalId: source.hubspotPortalId, dealId: source.hubspotDealId, dealName: source.hubspotDealName },
+      hubspot: { dealId: source.hubspotDealId, dealName: source.hubspotDealName },
     });
     await tx.documentRelationship.create({ data: { organizationId: ctx.organizationId, sourceDocumentId: source.id, targetDocumentId: doc.id, type: "DUPLICATED_FROM" } });
     await recordEvent(tx, doc, "CREATED", userActor(ctx), 1, { duplicatedFrom: source.number });
     await recordEvent(tx, source, "DUPLICATED", userActor(ctx), null, { newDocument: doc.number });
     await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_DUPLICATED", entityType: "Document", entityId: doc.id, metadata: { sourceDocumentId: source.id, sourceNumber: source.number } }, tx);
+    await emitDocumentEvent(doc, "DOCUMENT_CREATED", { duplicatedFrom: source.id }, tx);
     await recordUsage(ctx.organizationId, "DOCUMENT_CREATED", 1, { documentId: doc.id }, tx);
     return doc;
   });
@@ -772,13 +729,14 @@ export async function convertQuoteToContract(ctx: OrgContext, quoteId: string, t
       data,
       lines: linesToSeeds(src.lines),
       pricing: parsePricingConfig(src.version.pricingConfig),
-      hubspot: { connectionId: quote.hubspotConnectionId, portalId: quote.hubspotPortalId, dealId: quote.hubspotDealId, dealName: quote.hubspotDealName },
+      hubspot: { dealId: quote.hubspotDealId, dealName: quote.hubspotDealName },
       sourceQuoteId: quote.id,
     });
     await tx.documentRelationship.create({ data: { organizationId: ctx.organizationId, sourceDocumentId: quote.id, targetDocumentId: contract.id, type: "CONVERTED_FROM_QUOTE" } });
     await recordEvent(tx, contract, "CREATED", userActor(ctx), 1, { convertedFrom: quote.number });
     await recordEvent(tx, quote, "CONVERTED", userActor(ctx), null, { contract: contract.number });
     await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_CONVERTED", entityType: "Document", entityId: contract.id, metadata: { sourceQuoteId: quote.id, sourceNumber: quote.number } }, tx);
+    await emitDocumentEvent(contract, "DOCUMENT_CREATED", { convertedFromQuote: quote.id }, tx);
     await recordUsage(ctx.organizationId, "DOCUMENT_CREATED", 1, { documentId: contract.id }, tx);
     return contract;
   });
@@ -795,7 +753,7 @@ export async function setArchived(ctx: OrgContext, documentId: string, archived:
     await recordEvent(tx, doc, archived ? "ARCHIVED" : "RESTORED", userActor(ctx), null);
     await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: archived ? "DOCUMENT_ARCHIVED" : "DOCUMENT_RESTORED", entityType: "Document", entityId: doc.id, ip: ctx.meta.ip, userAgent: ctx.meta.userAgent }, tx);
   });
-  if (doc.hubspotDealId) await scheduleHubSpotSync(doc.id, ctx.organizationId, null);
+  await emitDocumentEvent(doc, "DOCUMENT_UPDATED", { change: archived ? "archived" : "restored" });
 }
 
 export async function cancelDocument(ctx: OrgContext, documentId: string, reason?: string) {
@@ -807,8 +765,8 @@ export async function cancelDocument(ctx: OrgContext, documentId: string, reason
     await invalidateOpenChallenges(tx, doc.id);
     await recordEvent(tx, doc, "CANCELLED", userActor(ctx), null, { reason: reason ?? null });
     await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_CANCELLED", entityType: "Document", entityId: doc.id, metadata: { reason } }, tx);
+    await emitDocumentEvent(doc, "DOCUMENT_CANCELLED", { reason: reason ?? null }, tx);
   });
-  if (doc.hubspotDealId) await scheduleHubSpotSync(doc.id, ctx.organizationId, null);
 }
 
 export async function setPrimaryDocument(ctx: OrgContext, documentId: string) {
@@ -821,7 +779,7 @@ export async function setPrimaryDocument(ctx: OrgContext, documentId: string) {
     await recordEvent(tx, doc, "PRIMARY_SET", userActor(ctx), null);
     await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_PRIMARY_SET", entityType: "Document", entityId: doc.id }, tx);
   });
-  await scheduleHubSpotSync(doc.id, ctx.organizationId, null);
+  await emitDocumentEvent(doc, "DOCUMENT_UPDATED", { change: "primary" });
 }
 
 export async function changeOwner(ctx: OrgContext, documentId: string, newOwnerId: string) {
@@ -834,6 +792,7 @@ export async function changeOwner(ctx: OrgContext, documentId: string, newOwnerI
     await tx.document.update({ where: { id: doc.id }, data: { ownerId: newOwnerId } });
     await recordEvent(tx, doc, "OWNER_CHANGED", userActor(ctx), null, { from: doc.ownerId, to: newOwnerId });
     await audit({ organizationId: ctx.organizationId, userId: ctx.user.id, action: "DOCUMENT_OWNER_CHANGED", entityType: "Document", entityId: doc.id, previousValue: { ownerId: doc.ownerId }, newValue: { ownerId: newOwnerId } }, tx);
+    await emitDocumentEvent(doc, "DOCUMENT_UPDATED", { change: "owner" }, tx);
   });
 }
 

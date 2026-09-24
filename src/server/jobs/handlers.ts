@@ -2,8 +2,7 @@ import { deliverEmail } from "../email/service";
 import { generateVersionPdf } from "../pdf/service";
 import { sendCompletionEmails } from "../documents/signing";
 import { expireDueDocuments } from "../documents/public";
-import { syncDocumentToHubSpot } from "../hubspot/sync";
-import { processWebhookEvent } from "../hubspot/webhooks";
+import { deliverSyncEvent } from "../integrations/outbound";
 import { registerJobHandler } from "./runner";
 
 let registered = false;
@@ -20,10 +19,7 @@ export function registerAllJobHandlers() {
     const fileId = await generateVersionPdf(String(p.versionId), { signed: true });
     if (fileId && p.sendConfirmation) await sendCompletionEmails(String(p.versionId));
   });
-  registerJobHandler("hubspot.syncDocument", async (p) =>
-    syncDocumentToHubSpot({ documentId: String(p.documentId), event: (p.event as Parameters<typeof syncDocumentToHubSpot>[0]["event"]) ?? null }),
-  );
-  registerJobHandler("hubspot.processWebhook", async (p) => processWebhookEvent({ webhookEventId: String(p.webhookEventId) }));
+  registerJobHandler("zapier.deliver", async (p) => deliverSyncEvent(String(p.syncEventId)));
   registerJobHandler("documents.expireDue", async () => {
     await expireDueDocuments();
   });

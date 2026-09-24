@@ -1,9 +1,8 @@
 import { prisma } from "../db";
 import { hmac } from "../security/crypto";
 import type { RequestMeta } from "../request";
-import { scheduleHubSpotSync } from "../hubspot/sync";
+import { emitDocumentEvent } from "../integrations/outbound";
 import { notifyUser } from "../services/notifications";
-import { automationEvent } from "./automation";
 import { changeStatus, recordEvent } from "./events";
 import { invalidateOpenChallenges } from "./otp";
 import { resolveFromRows } from "./render-input";
@@ -32,6 +31,7 @@ export async function expireIfDue(doc: { id: string; organizationId: string; sta
     await invalidateOpenChallenges(tx, doc.id);
     await recordEvent(tx, fresh, "EXPIRED", { type: "SYSTEM" }, null);
     await notifyUser({ organizationId: doc.organizationId, userId: doc.ownerId, type: "DOCUMENT_EXPIRED", title: `${doc.number} has expired`, body: `${doc.number} reached its expiration date without being completed.`, documentId: doc.id }, tx);
+    await emitDocumentEvent(doc, "DOCUMENT_EXPIRED", {}, tx);
     return true;
   });
   return changed;
@@ -117,8 +117,7 @@ export async function recordView(params: { token: string; visitorId: string; met
     }
     return { firstView, statusChanged: nextStatus !== fresh.status };
   });
-  if (result.firstView || result.statusChanged) {
-    await scheduleHubSpotSync(doc.id, doc.organizationId, result.statusChanged ? automationEvent(doc.type, "VIEWED") : null);
-  }
+  // Only the first view / status change is mirrored to HubSpot (not every page load).
+  if (result.firstView || result.statusChanged) await emitDocumentEvent(doc, "DOCUMENT_VIEWED", { firstView: result.firstView });
   return { counted: true };
 }

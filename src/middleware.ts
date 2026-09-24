@@ -4,10 +4,13 @@ import { NextResponse, type NextRequest } from "next/server";
  * Edge middleware:
  *  - Content-Security-Policy with a per-request nonce (Next.js applies it to its scripts).
  *  - CSRF defence for JSON/form API routes: mutating requests must come from our own origin.
- *    (Server Actions have their own built-in origin check; HubSpot webhooks and the
- *    signed App Card endpoint are authenticated by HubSpot request signatures instead.)
+ *    (Server Actions have their own built-in origin check; Zapier endpoints are
+ *    authenticated with the organization's integration secret instead of cookies.)
+ *  - Exposes the requested path to server components (x-pathname) so logged-out users
+ *    are sent back to the page they asked for after signing in.
  */
-const CSRF_EXEMPT = [/^\/api\/integrations\/hubspot\/webhooks/, /^\/api\/hubspot\/card/, /^\/api\/hubspot\/app-settings/];
+// Server-to-server endpoints authenticated by the Zapier integration secret instead of cookies.
+const CSRF_EXEMPT = [/^\/api\/integrations\/zapier\//];
 
 function sameOrigin(req: NextRequest): boolean {
   const origin = req.headers.get("origin") ?? req.headers.get("referer");
@@ -45,6 +48,7 @@ export function middleware(req: NextRequest) {
   const headers = new Headers(req.headers);
   headers.set("x-nonce", nonce);
   headers.set("Content-Security-Policy", csp);
+  headers.set("x-pathname", `${pathname}${req.nextUrl.search}`);
   const res = NextResponse.next({ request: { headers } });
   res.headers.set("Content-Security-Policy", csp);
   return res;

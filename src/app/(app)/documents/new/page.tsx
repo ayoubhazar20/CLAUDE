@@ -1,33 +1,26 @@
 import { requireOrgPage } from "@/server/auth/context";
 import { prisma } from "@/server/db";
-import { primaryConnection } from "@/server/hubspot/client";
+import { getIntegration, isConfigured } from "@/server/integrations/config";
+import { documentViewFilter } from "@/server/documents/access";
 import { Alert, ButtonLink, PageHeader } from "@/components/ui";
 import { PERMISSIONS } from "@/domain/permissions";
 import { NewDocumentWizard } from "./wizard";
 
 export const metadata = { title: "New document" };
 
-export default async function NewDocumentPage({ searchParams }: { searchParams: Promise<{ type?: string; dealId?: string; portalId?: string }> }) {
+export default async function NewDocumentPage({ searchParams }: { searchParams: Promise<{ type?: string; dealId?: string }> }) {
   const ctx = await requireOrgPage(PERMISSIONS.DOCUMENTS_CREATE);
   const sp = await searchParams;
-  const [templates, connection] = await Promise.all([
+  const dealId = sp.dealId && /^\d{1,30}$/.test(sp.dealId) ? sp.dealId : null;
+  const [templates, integration, existing] = await Promise.all([
     prisma.template.findMany({
       where: { organizationId: ctx.organizationId, status: "ACTIVE", publishedVersionId: { not: null } },
       select: { id: true, name: true, documentType: true, isDefault: true, description: true },
       orderBy: [{ isDefault: "desc" }, { name: "asc" }],
     }),
-    primaryConnection(ctx.organizationId),
+    getIntegration(ctx.organizationId),
+    dealId ? prisma.document.findMany({ where: { AND: [await documentViewFilter(ctx), { hubspotDealId: dealId }] }, select: { id: true } }) : Promise.resolve([]),
   ]);
-  if (sp.portalId && connection && connection.portalId !== sp.portalId) {
-    return (
-      <>
-        <PageHeader title="New document" />
-        <Alert tone="error" title="Different HubSpot account">
-          This deal belongs to a HubSpot account that is not connected to {ctx.organization.name}. Switch organization or connect this HubSpot account.
-        </Alert>
-      </>
-    );
-  }
   if (!templates.length) {
     return (
       <>
@@ -39,17 +32,15 @@ export default async function NewDocumentPage({ searchParams }: { searchParams: 
       </>
     );
   }
-  const type = sp.type === "CONTRACT" ? "CONTRACT" : sp.type === "QUOTE" ? "QUOTE" : null;
+  const raw = (sp.type ?? "").toUpperCase();
+  const type = raw === "CONTRACT" ? "CONTRACT" : raw === "QUOTE" ? "QUOTE" : null;
   return (
     <>
-      <PageHeader title="New document" description="Pick a deal and a template — DealDocs imports the client, company and products for you." back={{ href: "/documents", label: "Documents" }} />
-      <NewDocumentWizard
-        templates={templates}
-        initialType={type}
-        initialDealId={sp.dealId && /^\d{1,30}$/.test(sp.dealId) ? sp.dealId : null}
-        hubspotConnected={connection?.status === "CONNECTED"}
-        defaultCurrency={ctx.organization.defaultCurrency}
-      />
+      <PageHeader title="New document" description="Pick a template — DealDocs asks HubSpot (via Zapier) for the deal’s client, company and products." back={{ href: dealId ? `/deals/${dealId}/documents` : "/documents", label: dealId ? "Deal documents" : "Documents" }} />
+      {dealId && existing.length ? (
+        <div className="mb-4"><Alert tone="info">This deal already has {existing.length} document{existing.length > 1 ? "s" : ""}. <a className="font-semibold underline" href={`/deals/${dealId}/documents`}>View them</a></Alert></div>
+      ) : null}
+      <NewDocumentWizard templates={templates} initialType={type} initialDealId={dealId} integrationReady={isConfigured(integration)} defaultCurrency={ctx.organization.defaultCurrency} />
     </>
   );
 }

@@ -40,3 +40,18 @@ export async function publicAttachment(token: string, attachmentId: string) {
   if (!attachment) throw new NotFoundError("Attachment");
   return { ...attachment.file, filename: attachment.name };
 }
+
+/**
+ * Versioned PDF link used as HubSpot `file_url`: /files/{token}/v{n}.pdf.
+ * Only published (locked) versions are served; completed versions serve the final signed/accepted PDF.
+ */
+export async function publicVersionPdf(token: string, fileName: string) {
+  const match = /^v(\d{1,5})\.pdf$/.exec(fileName);
+  const doc = await findPublishedDocument(token);
+  if (!doc || !match || doc.archivedAt) throw new NotFoundError("File");
+  const version = await prisma.documentVersion.findFirst({ where: { documentId: doc.id, versionNumber: Number(match[1]), lockedAt: { not: null } } });
+  if (!version) throw new NotFoundError("File");
+  const fileId = version.signedPdfFileId ?? version.pdfFileId;
+  if (!fileId) return null;
+  return prisma.storedFile.findFirstOrThrow({ where: { id: fileId, organizationId: doc.organizationId } });
+}

@@ -9,7 +9,7 @@ Source lives on GitHub; each environment is a separate deployment with its own d
 | staging | `staging` | `dealdocs_staging` | `https://staging.dealdocs.example` |
 | production | `main` | `dealdocs_production` | `https://app.dealdocs.example` |
 
-Use a **separate HubSpot app** (or at least separate redirect URL/webhook target) for staging.
+Use **separate Zaps** (and a separate integration secret) for staging, pointing at a sandbox HubSpot portal.
 
 ---
 
@@ -22,9 +22,10 @@ All configuration is via environment variables (see `.env.example`). Never commi
 | `NODE_ENV=production` | Enables secure cookies and strict key checks |
 | `APP_URL` | Public HTTPS URL, no trailing slash |
 | `DATABASE_URL` | PostgreSQL connection string (use SSL for remote databases: `?sslmode=require`) |
-| `ENCRYPTION_KEY` | 32 random bytes, base64 — encrypts HubSpot tokens. **Back it up**; losing it means reconnecting HubSpot |
+| `ENCRYPTION_KEY` | 32 random bytes, base64 — encrypts integration secrets. **Back it up**; losing it means rotating the Zapier secret |
 | `SECRET_KEY` | 32 random bytes, base64 — HMAC for sessions, OTPs, reset links |
-| `HUBSPOT_CLIENT_ID`, `HUBSPOT_CLIENT_SECRET` | From the HubSpot app |
+| `HUBSPOT_DOCUMENT_OBJECT_TYPE_ID` | Optional default custom object type id (e.g. `2-12345678`); organizations can override it |
+| `ZAPIER_ALLOWED_HOSTS` | Comma-separated hosts allowed as webhook targets (default `hooks.zapier.com`) |
 | `EMAIL_PROVIDER=smtp`, `SMTP_*`, `EMAIL_FROM` | Hostinger mail or any SMTP provider |
 | `STORAGE_DRIVER` | `local` (persistent private directory) or `s3` (any S3-compatible bucket) |
 | `JOB_RUNNER` | `inline` (single process) or `external` (run `npm run worker` separately) |
@@ -104,8 +105,11 @@ Prisma engines for Debian (VPS) and RHEL/CloudLinux (managed hosting) are declar
 
 ## 4. Operations
 
+- **HubSpot**: no HubSpot credentials are needed on the server. Zapier must reach
+  `APP_URL/api/integrations/zapier/*` over HTTPS; see [`ZAPIER.md`](ZAPIER.md).
+
 - **Health check**: `GET /api/health` (database connectivity; does not affect analytics).
-- **Platform admin**: `/admin` — approvals, suspensions, plans, usage, HubSpot connections,
+- **Platform admin**: `/admin` — approvals, suspensions, plans, usage, Zapier integrations & failed sync events,
   system health (queue lag, dead jobs, failed emails/webhooks) and error logs by trace id.
 - **Backups**: daily `pg_dump` of the database **and** the storage directory/bucket; keep the
   `ENCRYPTION_KEY` in a secret manager.

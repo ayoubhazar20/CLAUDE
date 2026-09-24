@@ -26,9 +26,17 @@ export function useOutbox() {
   return provider;
 }
 
-export async function processJobs() {
+/**
+ * Run all background jobs, fast-forwarding scheduled ones (e.g. Zapier deliveries
+ * waiting for a PDF, or retries after a failure) so tests do not depend on wall time.
+ */
+export async function processJobs(rounds = 5) {
   registerAllJobHandlers();
-  await drainJobs(50);
+  for (let i = 0; i < rounds; i++) {
+    await drainJobs(50);
+    const scheduled = await prisma.job.updateMany({ where: { status: "PENDING", runAt: { gt: new Date() } }, data: { runAt: new Date() } });
+    if (scheduled.count === 0) return;
+  }
 }
 
 export async function createUser(email: string, name = email.split("@")[0]!, opts: { verified?: boolean; platformAdmin?: boolean; password?: string } = {}) {

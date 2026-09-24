@@ -27,8 +27,7 @@ export async function createDocumentAction(_prev: ActionState, form: FormData): 
     const doc = await createDocument(ctx, {
       type: formString(form, "type") as "QUOTE" | "CONTRACT",
       templateId: formString(form, "templateId"),
-      hubspotDealId: formString(form, "dealId") || null,
-      contactId: formString(form, "contactId") || null,
+      hubspotDealId: formString(form, "dealId").trim() || null,
       currency: formString(form, "currency") || undefined,
     });
     id = doc.id;

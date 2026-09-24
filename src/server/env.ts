@@ -6,15 +6,10 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   ENCRYPTION_KEY: z.string().min(1, "ENCRYPTION_KEY is required"),
   SECRET_KEY: z.string().min(1, "SECRET_KEY is required"),
-  HUBSPOT_CLIENT_ID: z.string().optional().default(""),
-  HUBSPOT_CLIENT_SECRET: z.string().optional().default(""),
-  HUBSPOT_SCOPES: z
-    .string()
-    .default(
-      "oauth crm.objects.deals.read crm.objects.deals.write crm.objects.contacts.read crm.objects.companies.read crm.objects.line_items.read crm.objects.owners.read crm.schemas.deals.read crm.schemas.deals.write e-commerce",
-    ),
-  HUBSPOT_REDIRECT_URI: z.string().optional().default(""),
-  HUBSPOT_API_BASE: z.string().url().default("https://api.hubapi.com"),
+  /** Default HubSpot custom object type id for documents (per-organization setting overrides it). */
+  HUBSPOT_DOCUMENT_OBJECT_TYPE_ID: z.string().optional().default(""),
+  /** Hosts allowed as outbound Zapier webhook targets (SSRF protection), comma separated. */
+  ZAPIER_ALLOWED_HOSTS: z.string().default("hooks.zapier.com"),
   EMAIL_PROVIDER: z.enum(["smtp", "log"]).default("log"),
   EMAIL_FROM: z.string().default("DealDocs <no-reply@example.com>"),
   SMTP_HOST: z.string().optional().default(""),

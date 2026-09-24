@@ -7,7 +7,7 @@ import { listDocuments, listFiltersSchema } from "@/server/documents/queries";
 import { fileForUser } from "@/server/services/attachments";
 import { inviteUser, setMembershipStatus, createTeam, setTeamMember } from "@/server/services/members";
 import { saveTemplateDraft, publishTemplate, getTemplateForEditing } from "@/server/services/templates";
-import { upsertPropertyMapping } from "@/server/hubspot/settings";
+import { saveIntegrationSettings } from "@/server/integrations/config";
 import { systemRole } from "@/server/services/roles";
 import { addMember, createActiveOrg, processJobs, resetDatabase, templateId, useOutbox } from "./helpers";
 
@@ -69,7 +69,7 @@ describe("tenant isolation and permissions", () => {
     await expect(newQuote(viewer.ctx)).rejects.toThrow(/permission/);
     const version = await prisma.documentVersion.findFirstOrThrow({ where: { documentId: own.id } });
     await expect(saveDraft(viewer.ctx, own.id, { baseUpdatedAt: version.updatedAt.toISOString(), title: "x" })).rejects.toThrow(/cannot edit/);
-    await expect(upsertPropertyMapping(user1.ctx, { objectType: "DEAL", hubspotProperty: "a", variableKey: "a.b", direction: "IMPORT" })).rejects.toThrow(/permission/);
+    await expect(saveIntegrationSettings(user1.ctx, { enabled: true, hubspotObjectTypeId: "2-1", webhookUrl: "https://hooks.zapier.com/x", dealPropertyNames: {}, statusMapping: {}, propertyVariableMap: {} })).rejects.toThrow(/permission/);
     await expect(inviteUser(user1.ctx, { email: "z@z.test", roleId: (await systemRole("admin")).id })).rejects.toThrow(/permission/);
   });
 

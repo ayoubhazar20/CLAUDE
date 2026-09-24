@@ -1,5 +1,6 @@
 import type { Organization, OrganizationStatus } from "@prisma/client";
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 import { cache } from "react";
 import { prisma } from "../db";
 import { ForbiddenError, UnauthorizedError } from "../errors";
@@ -160,9 +161,19 @@ export function assertOrgActive(ctx: OrgContext) {
 
 // ── Page guards (redirect instead of throwing) ─────────────────────────────
 
+/**
+ * Send a logged-out visitor to the login page, remembering where they wanted to go
+ * (e.g. /documents/new?type=quote&dealId=123 from the HubSpot card).
+ */
+async function redirectToLogin(): Promise<never> {
+  const path = (await headers()).get("x-pathname") ?? "";
+  const safe = path.startsWith("/") && !path.startsWith("//") && !path.startsWith("/login") ? path : "";
+  redirect(safe && safe !== "/" ? `/login?next=${encodeURIComponent(safe)}` : "/login");
+}
+
 export async function requireUserPage() {
   const user = await getCurrentUser();
-  if (!user) redirect("/login");
+  if (!user) return redirectToLogin();
   return user;
 }
 
@@ -176,7 +187,7 @@ const STATUS_REDIRECTS: Partial<Record<OrganizationStatus, string>> = {
 /** For pages of the tenant app: signed in, member of an active organization. */
 export async function requireOrgPage(permission?: Permission): Promise<OrgContext> {
   const user = await getCurrentUser();
-  if (!user) redirect("/login");
+  if (!user) return redirectToLogin();
   if (!user.emailVerified) redirect("/verify-email");
   const ctx = await getOrgContext();
   if (!ctx) {
@@ -200,7 +211,7 @@ export async function requireOrgApi(permission?: Permission): Promise<OrgContext
 
 export async function requirePlatformAdminPage() {
   const user = await getCurrentUser();
-  if (!user) redirect("/login");
+  if (!user) return redirectToLogin();
   if (!user.isPlatformAdmin) redirect("/unauthorized");
   return user;
 }

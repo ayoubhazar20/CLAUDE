@@ -8,7 +8,7 @@ const NAV = [
   { href: "/admin/users", label: "Users" },
   { href: "/admin/plans", label: "Plans" },
   { href: "/admin/usage", label: "Usage" },
-  { href: "/admin/hubspot", label: "HubSpot connections" },
+  { href: "/admin/integrations", label: "HubSpot / Zapier" },
   { href: "/admin/documents", label: "Documents statistics" },
   { href: "/admin/health", label: "System health" },
   { href: "/admin/errors", label: "Errors" },

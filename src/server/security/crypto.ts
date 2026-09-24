@@ -3,7 +3,7 @@ import { env } from "../env";
 
 /**
  * Cryptographic helpers.
- *  - encrypt/decrypt: AES-256-GCM for secrets at rest (OAuth tokens …).
+ *  - encrypt/decrypt: AES-256-GCM for secrets at rest (integration secrets …).
  *  - hmac: keyed hashes for tokens we only need to compare (sessions, OTPs, reset links).
  */
 

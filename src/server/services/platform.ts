@@ -7,7 +7,7 @@ export async function platformOverview() {
     prisma.user.count(),
     prisma.document.count(),
     prisma.document.groupBy({ by: ["status"], _count: true }),
-    prisma.hubSpotConnection.groupBy({ by: ["status"], _count: true }),
+    prisma.zapierIntegration.count({ where: { enabled: true, webhookUrl: { not: null } } }),
     prisma.job.count({ where: { status: "PENDING", attempts: { gt: 0 } } }),
     prisma.job.count({ where: { status: "DEAD" } }),
     prisma.errorLog.count({ where: { createdAt: { gte: new Date(Date.now() - 24 * 3600 * 1000) } } }),
@@ -31,7 +31,7 @@ export async function systemHealth() {
     prisma.job.count({ where: { status: "RUNNING" } }),
     prisma.job.findMany({ where: { status: "DEAD" }, orderBy: { createdAt: "desc" }, take: 20 }),
     prisma.emailDelivery.count({ where: { status: "FAILED" } }),
-    prisma.hubSpotWebhookEvent.count({ where: { status: "FAILED" } }),
+    prisma.syncEvent.count({ where: { status: "FAILED" } }),
   ]);
   return {
     database,
@@ -41,6 +41,6 @@ export async function systemHealth() {
     runningJobs,
     deadJobs,
     failedEmails,
-    failedWebhooks,
+    failedSyncEvents: failedWebhooks,
   };
 }

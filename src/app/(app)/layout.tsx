@@ -20,7 +20,7 @@ export default async function TenantLayout({ children }: { children: React.React
     { href: "/documents?type=CONTRACT", label: t("nav.contracts") },
   ];
   if (ctx.permissions.has(PERMISSIONS.TEMPLATES_VIEW)) nav.push({ href: "/templates", label: t("nav.templates") });
-  if (ctx.permissions.has(PERMISSIONS.DOCUMENTS_CREATE)) nav.push({ href: "/deals", label: t("nav.deals") });
+  nav.push({ href: "/deals", label: t("nav.deals") });
   nav.push({ href: "/notifications", label: t("nav.notifications") }, { href: "/settings", label: t("nav.settings") });
 
   const banner = ctx.isSupportView ? (

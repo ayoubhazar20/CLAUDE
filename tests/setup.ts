@@ -12,8 +12,7 @@ Object.assign(process.env, {
   EMAIL_PROVIDER: "log",
   STORAGE_DRIVER: "local",
   STORAGE_LOCAL_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "dealdocs-test-")),
-  HUBSPOT_CLIENT_ID: "test-client-id",
-  HUBSPOT_CLIENT_SECRET: "test-client-secret",
-  HUBSPOT_API_BASE: "https://api.hubapi.test",
+  HUBSPOT_DOCUMENT_OBJECT_TYPE_ID: "2-99999999",
+  ZAPIER_ALLOWED_HOSTS: "hooks.zapier.com",
   JOB_RUNNER: "external",
 });

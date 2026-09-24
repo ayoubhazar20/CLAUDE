@@ -9,12 +9,11 @@ import { enforceRateLimit } from "../security/rate-limit";
 import { queueEmail } from "../email/service";
 import { renderEmailLayout, textToEmailHtml } from "../email/layout";
 import { recordUsage } from "../services/billing";
-import { scheduleHubSpotSync } from "../hubspot/sync";
+import { emitDocumentEvent } from "../integrations/outbound";
 import { DEFAULT_EMAIL_TEMPLATES } from "../services/starter-content";
 import { loadDocumentForEdit } from "./access";
 import { changeStatus, recordEvent, userActor } from "./events";
 import { buildResolveInput } from "./render-input";
-import { automationEvent } from "./automation";
 import { buildVariables } from "@/domain/resolve";
 import { interpolate } from "@/domain/variables";
 import { OPEN_STATUSES, isForwardProgress } from "@/domain/status";
@@ -129,6 +128,6 @@ export async function sendDocument(ctx: OrgContext, documentId: string, input: z
     await recordUsage(ctx.organizationId, "EMAIL_SENT", data.to.length + data.cc.length, { documentId: doc.id }, tx);
     return delivery;
   });
-  if (data.kind === "initial") await scheduleHubSpotSync(doc.id, ctx.organizationId, automationEvent(doc.type, "SENT"));
+  await emitDocumentEvent(doc, "DOCUMENT_SENT", { kind: data.kind, to: data.to, version: version.versionNumber });
   return delivery;
 }

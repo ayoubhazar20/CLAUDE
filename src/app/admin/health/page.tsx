@@ -18,7 +18,7 @@ export default async function AdminHealth() {
               { label: "Queue lag", value: `${h.queueLagSeconds} s` },
               { label: "Running jobs", value: h.runningJobs },
               { label: "Failed emails", value: h.failedEmails },
-              { label: "Failed webhook events", value: h.failedWebhooks },
+              { label: "Failed Zapier sync events", value: h.failedSyncEvents },
               { label: "Node.js", value: process.version },
               { label: "Uptime", value: `${Math.round(process.uptime() / 60)} min` },
             ]}

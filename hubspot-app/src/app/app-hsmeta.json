@@ -3,34 +3,22 @@
   "type": "app",
   "config": {
     "name": "DealDocs",
-    "description": "Create, send, track and sign quotes and contracts from HubSpot deals.",
-    "distribution": "marketplace",
+    "description": "Open DealDocs from a HubSpot deal to create quotes and contracts. Documents are mirrored to HubSpot by Zapier.",
+    "distribution": "private",
     "auth": {
-      "type": "oauth",
-      "redirectUrls": ["https://app.dealdocs.example/api/integrations/hubspot/callback"],
-      "requiredScopes": [
-        "oauth",
-        "crm.objects.deals.read",
-        "crm.objects.deals.write",
-        "crm.objects.contacts.read",
-        "crm.objects.companies.read",
-        "crm.objects.line_items.read",
-        "crm.objects.owners.read",
-        "crm.schemas.deals.read",
-        "crm.schemas.deals.write",
-        "e-commerce"
-      ],
+      "type": "static",
+      "requiredScopes": ["crm.objects.deals.read"],
       "optionalScopes": [],
       "conditionallyRequiredScopes": []
     },
     "permittedUrls": {
-      "fetch": ["https://app.dealdocs.example"],
+      "fetch": [],
       "iframe": [],
-      "img": ["https://app.dealdocs.example"]
+      "img": []
     },
     "support": {
       "supportEmail": "support@dealdocs.example",
-      "documentationUrl": "https://app.dealdocs.example/legal/terms",
+      "documentationUrl": "https://app.dealdocs.example",
       "supportUrl": "https://app.dealdocs.example",
       "supportPhone": ""
     }
